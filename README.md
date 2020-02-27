@@ -2,11 +2,13 @@
 Uses MobileNet NN to locate and notify security cam images based on presence of people, vehicles
 
 ## Credits
-Neural net code originally taken from https://www.pyimagesearch.com/2017/09/11/object-detection-with-deep-learning-and-opencv/
-Email parsing originally from https://www.ianlewis.org/en/parsing-email-attachments-python
+
+* Neural net code originally taken from [here](https://www.pyimagesearch.com/2017/09/11/object-detection-with-deep-learning-and-opencv/).
+* Email parsing originally from [here](https://www.ianlewis.org/en/parsing-email-attachments-python).
 
 ## Dependencies
 
+* Linux with Postfix MTA installed (`sudo apt-get install postfix` on Ubuntu)
 * Python 3
 * Postfix
 * `pip3 install python-pushover numpy opencv-contrib-python-headless`
@@ -28,14 +30,31 @@ min_notify_period=600
 
 ## Setup
 
-These instructions are for Ubuntu 18.04 LTS using a factory Postfix install.
+These instructions are for Ubuntu 18.04 LTS using a factory Postfix install:
+
+```
+cd <ODDSPOT DIR>
+touch oddspot.dat
+sudo chgrp postfix oddspot.dat logs
+```
+
+Change permissions so that postfix can create/modify the state file, and write info to the logs.
 
 Edit your `/etc/aliases` and add the following line (replacing the path as necessary):
 ```
-oddspot:  "|/YOUR/PATH/TO/oddspot.py"
+oddspot:  "|/YOUR/PATH/TO/oddspot.py --debug"
 ```
 
 Then, run `sudo newaliases`.
+
+## Testing
+
+* Install the `mail` application (`sudo apt-get install mailutils` on Ubuntu).
+* Copy a camera capture image to the system, and run the following command to send a test email that Postfix should pick up and process:
+
+`echo "Test email body" | mail -s "Test 123" oddspot@<SERVER HOSTNAME> -A <TESTIMAGE>.jpg`
+
+Tail `/var/log/mail.log` to see if processing was successful or not.
 
 ## Usage
 
