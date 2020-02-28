@@ -156,11 +156,9 @@ def main():
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=1048576 * 2, backupCount=5)
     file_handler.setFormatter(formatter)
-    stream_handler = logging.StreamHandler()
-    #stream_handler.setFormatter(formatter)
     # log both to file and to console
     logger.addHandler(file_handler)
-    logger.addHandler(stream_handler)
+    logger.addHandler(logging.StreamHandler())
     logger.info("START")
 
     # set up exception hook
@@ -233,7 +231,7 @@ def main():
     if not parsed_email['attachments'] or parsed_email['attachments'][0].content_type not in ('application/octet-stream', 'image/jpeg', 'image/png'):
         raise Exception("Cannot parse out image from stdin email")
     img_attachment = parsed_email['attachments'][0]
-    logger.info("Using attachment 0, type: {}, size: {}".format(img_attachment.content_type, img_attachment.size))
+    logger.info("Using email attachment 0, type: {}, size: {}".format(img_attachment.content_type, img_attachment.size))
 
     # load our serialized model from disk
     logger.info("loading model {} (prototxt: {})...".format(conf['model_caffe_file'], conf['model_prototxt_file']))
@@ -257,8 +255,7 @@ def main():
     # loop over the detections
     found_objects = []
     for i in np.arange(0, detections.shape[2]):
-        # extract the confidence (i.e., probability) associated with the
-        # prediction
+        # extract the confidence (i.e., probability) associated with the prediction
         confidence = detections[0, 0, i, 2]
 
         # filter out weak detections by ensuring the `confidence` is
@@ -269,9 +266,7 @@ def main():
                 MODEL_CLASSES[idx], confidence * 100))
         if confidence > conf['min_confidence']:
             # extract the index of the class label from the `detections`,
-            # then compute the (x, y)-coordinates of the bounding box for
-            # the object
-            #idx = int(detections[0, 0, i, 1])
+            # then compute the (x, y)-coordinates of the bounding box for the object
             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
             (startX, startY, endX, endY) = box.astype("int")
 
@@ -305,13 +300,12 @@ def main():
     # notify via pushover
     c = pushover.Client(conf['pushover_user_key'], api_token=conf['pushover_api_token'])
     found_objects_str = ', '.join(['{} ({:.2f}%)'.format(e[0], e[1]) for e in found_objects])
-    c.send_message("Identified {}".format(found_objects_str), title="{} Oddspot Alert".format(camera_name), attachment=('capture.jpg', str_encode))
+    c.send_message("Identified {}".format(found_objects_str),
+        title="{} Oddspot Alert".format(camera_name), attachment=('capture.jpg', str_encode))
     logger.info("Sent image (size: {} bytes) via pushover".format(len(str_encode)))
 
     # update state
     state['last_notify'][camera_name] = utc_now_epoch
-    if camera_name in state:
-        del state[camera_name]
 
     # dump state
     dump_state(state)
