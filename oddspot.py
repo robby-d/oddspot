@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# import the necessary packages
 import os
 import sys
 import io
@@ -16,10 +15,15 @@ import json
 import sys
 import requests
 import traceback
+import math
+from builtins import str
 
-import numpy as np
-import cv2
 import pushover
+import cv2
+import numpy as np
+
+
+from objdetection import detectron2, opencv_mobilenetssd
 
 PROG_NAME = "oddspot"
 CURDIR = os.path.dirname(os.path.realpath(__file__))
@@ -29,26 +33,33 @@ CONF_FILE = os.path.join(CURDIR, "{}.ini".format(PROG_NAME))
 
 # initialize the list of class labels MobileNet SSD was trained to
 # detect, then generate a set of bounding box colors for each class
-MODEL_CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
-    "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
-    "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
-    "sofa", "train", "tvmonitor"]
-MODEL_COLORS = np.random.uniform(0, 255, size=(len(MODEL_CLASSES), 3))
+DEFAULT_MODEL_CLASSES_OVERRIDE = []
 DEFAULT_MIN_CONFIDENCE = 0.7  # 70%
-DEFAULT_MODEL_PROTOTXT_FILE = "MobileNetSSD_deploy.prototxt.txt"
-DEFAULT_MODEL_CAFFE_FILE = "MobileNetSSD_deploy.caffemodel"
+OBJDETECTION_FRAMEWORK_CHOICES = ("detectron2", "opencv_mobilenetssd")
+DEFAULT_OBJDETECTION_FRAMEWORK = "detectron2"
 DEFAULT_MODEL_CLASSES = "background,car,bus,person"
 DEFAULT_MIN_NOTIFY_PERIOD = 600  # in seconds (600 = 10 minutes)
+
+PUSHOVER_MAX_ATTACHMENT_SIZE = 2621440  #2.5MB
 
 logger = logging.getLogger(__name__)
 utc_now = datetime.datetime.utcnow()
 utc_now_epoch_timestamp = utc_now.timestamp()
 utc_now_epoch = int(utc_now_epoch_timestamp)  # second precision
 
+def convert_size(size_bytes):
+   if size_bytes == 0:
+       return "0B"
+   size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
+   i = int(math.floor(math.log(size_bytes, 1024)))
+   p = math.pow(1024, i)
+   s = round(size_bytes / p, 2)
+   return "%s %s" % (s, size_name[i])
+
 def load_state():
     try:
         state = pickle.load(open(STATE_FILE, "rb"))
-        if not state:  # empty state file
+        if not state:  # empty state files
             raise Exception
         logger.debug("Loaded state: %s" % state)
     except:
@@ -63,6 +74,36 @@ def dump_state(state):
     logger.debug("Dumping state: %s" % state)
     pickle.dump(state, open(STATE_FILE, "wb"))
 
+def load_config():
+    if not os.path.exists(CONF_FILE):
+        raise Exception("Config file does not exist at path: '{}'".format(CONF_FILE))
+    conf = {}
+    cp = configparser.ConfigParser()
+    cp.read(CONF_FILE)
+
+    conf['pushover_user_key'] = cp.get('Default', 'pushover_user_key')
+    conf['pushover_api_token'] = cp.get('Default', 'pushover_api_token')
+
+    conf['min_confidence'] = cp.getfloat('Default', 'min_confidence', fallback=DEFAULT_MIN_CONFIDENCE)
+    assert conf['min_confidence'] > 0.0 and conf['min_confidence'] <= 1.0
+
+    conf['objdetection_framework'] = cp.get('Default', 'objdetection_framework', fallback=DEFAULT_OBJDETECTION_FRAMEWORK)
+    if conf['objdetection_framework'] not in OBJDETECTION_FRAMEWORK_CHOICES:
+        raise Exception("'objdetection_framework' config option must be one of: {}".format(', '.join(OBJDETECTION_FRAMEWORK_CHOICES)))
+
+    conf['min_notify_period'] = cp.getint('Default', 'min_notify_period', fallback=DEFAULT_MIN_NOTIFY_PERIOD)
+    assert conf['min_notify_period'] >= 0
+
+    conf['notify_on_dataset_categories'] = cp.get('Default', 'notify_on_dataset_categories')
+    conf['notify_on_dataset_categories'] = [e.strip() for e in conf['notify_on_dataset_categories'].split(',')]
+
+    conf['camera_names'] = cp.get('Default', 'camera_names', fallback={})
+    if conf['camera_names']:
+        conf['camera_names'] = json.loads(conf['camera_names'])
+    assert isinstance(conf['camera_names'], dict)
+
+    return conf, cp
+
 def email_parse_attachment(message_part, multipart=True):
     if multipart:
         content_disposition = message_part.get("Content-Disposition", None)
@@ -71,7 +112,7 @@ def email_parse_attachment(message_part, multipart=True):
         dispositions = content_disposition.strip().split(";")
         if dispositions[0].lower() != "attachment":
             return None
-    
+
     file_data = message_part.get_payload(decode=True)
     attachment = io.BytesIO(file_data)
     attachment.content_type = message_part.get_content_type()
@@ -115,25 +156,17 @@ def email_parse(content):
             attachments.append(attachment)
     else:
         for part in msgobj.walk():
-            attachment = email_parse_multipart_attachment(part, multipart=True)
+            attachment = email_parse_attachment(part, multipart=True)
             if attachment:
                 attachments.append(attachment)
             elif part.get_content_type() == "text/plain":
                 if body is None:
                     body = ""
-                body += unicode(
-                    part.get_payload(decode=True),
-                    part.get_content_charset(),
-                    'replace'
-                ).encode('utf8','replace')
+                body += part.get_payload(decode=True).decode('utf8', 'replace')
             elif part.get_content_type() == "text/html":
                 if html is None:
                     html = ""
-                html += unicode(
-                    part.get_payload(decode=True),
-                    part.get_content_charset(),
-                    'replace'
-                ).encode('utf8','replace')
+                html += part.get_payload(decode=True).decode('utf8', 'replace')
 
     return {
         'subject' : subject,
@@ -177,45 +210,15 @@ def main():
                 try:
                     error_locals.append("\t{:.40}: {:.255}\n".format(k, v))
                 except:
-                    error_locals.append("\t{:.40}: CANNOT PRINT VALUE\n".format(k))        
+                    error_locals.append("\t{:.40}: CANNOT PRINT VALUE\n".format(k))
         error_locals_str = ''.join(error_locals)
 
         logger.critical("Uncaught exception", exc_info=(type, value, tb))
         logger.info(error_locals_str)
-    sys.excepthook = handle_exception    
+    sys.excepthook = handle_exception
 
     # load and validate config
-    if not os.path.exists(CONF_FILE):
-        raise Exception("Config file does not exist at path: '{}'".format(CONF_FILE))
-    conf = {}
-    config = configparser.ConfigParser()
-    config.read(CONF_FILE)
-    conf['pushover_user_key'] = config.get('Default', 'pushover_user_key')
-    conf['pushover_api_token'] = config.get('Default', 'pushover_api_token')
-    conf['min_confidence'] = config.getfloat('Default', 'min_confidence', fallback=DEFAULT_MIN_CONFIDENCE)
-    assert conf['min_confidence'] > 0.0 and conf['min_confidence'] <= 1.0
-    conf['model_prototxt_file'] = config.get('Default', 'model_prototxt_file', fallback=DEFAULT_MODEL_PROTOTXT_FILE)
-    model_prototxt_file_path = os.path.join(CURDIR, 'models', conf['model_prototxt_file'])
-    if not os.path.exists(model_prototxt_file_path):
-        raise Exception("Could not find specified model prototxt file: '{}'".format(model_prototxt_file_path))
-    conf['model_caffe_file'] = config.get('Default', 'model_caffe_file', fallback=DEFAULT_MODEL_CAFFE_FILE)
-    model_caffe_file_path = os.path.join(CURDIR, 'models', conf['model_caffe_file'])
-    if not os.path.exists(model_caffe_file_path):
-        raise Exception("Could not find specified model caffe file: '{}'".format(model_caffe_file_path))
-    conf['model_classes'] = config.get('Default', 'model_classes', fallback=DEFAULT_MODEL_CLASSES)
-    conf['model_classes'] = [e.strip() for e in conf['model_classes'].split(',')]
-    if 'background' not in conf['model_classes']:
-        raise Exception("'background' must be listed in supplied model_classes config value")
-    for e in conf['model_classes']:
-        if e not in MODEL_CLASSES:
-            raise Exception("Invalid value '{}' is listed in supplied model_classes config value. Valid options: {}".format(
-                e, ', '.join(MODEL_CLASSES)))
-    conf['min_notify_period'] = config.getint('Default', 'min_notify_period', fallback=DEFAULT_MIN_NOTIFY_PERIOD)
-    assert conf['min_notify_period'] >= 0
-    conf['camera_names'] = config.get('Default', 'camera_names', fallback={})
-    if conf['camera_names']:
-        conf['camera_names'] = json.loads(conf['camera_names'])
-    assert isinstance(conf['camera_names'], dict)
+    conf, cp = load_config()
 
     # load state
     state = load_state()
@@ -225,65 +228,37 @@ def main():
     parsed_email = email_parse(stdin_data)
 
     # parse the raw image data out of the email
-    logger.debug("Email from: '{}', subject: '{}'".format(parsed_email['from'], parsed_email['subject']))
-    logger.debug("Email has {} attachments: {}".format(len(parsed_email['attachments']),
-        ', '.join([a.content_type for a in parsed_email['attachments']]) if len(parsed_email['attachments']) else 'N/A'))
+    logger.info("Email from: '{}', subject: '{}'".format(parsed_email['from'], parsed_email['subject']))
+    logger.info("Email has {} attachments: {}".format(len(parsed_email['attachments']),
+        ', '.join(['{}: {} (size: {}) ({})'.format(i, a.content_type, convert_size(a.size), 'USING' if i==0 else 'NOT USING')
+            for i, a in enumerate(parsed_email['attachments'])]) if len(parsed_email['attachments']) else 'N/A'))
     if not parsed_email['attachments'] or parsed_email['attachments'][0].content_type not in ('application/octet-stream', 'image/jpeg', 'image/png'):
         raise Exception("Cannot parse out image from stdin email")
+    # use first attachment
     img_attachment = parsed_email['attachments'][0]
-    logger.info("Using email attachment 0, type: {}, size: {}".format(img_attachment.content_type, img_attachment.size))
-
-    # load our serialized model from disk
-    logger.info("loading model {} (prototxt: {})...".format(conf['model_caffe_file'], conf['model_prototxt_file']))
-    net = cv2.dnn.readNetFromCaffe(model_prototxt_file_path, model_caffe_file_path)
-
-    # load the input image and construct an input blob for the image
-    # by resizing to a fixed 300x300 pixels and then normalizing it
-    # (note: normalization is done via the authors of the MobileNet SSD
-    # implementation)
     img_attachment.seek(0)  # just in case
-    bytes_as_np_array = np.frombuffer(img_attachment.read(), dtype=np.uint8)
-    image = cv2.imdecode(bytes_as_np_array, cv2.IMREAD_UNCHANGED)
-    (h, w) = image.shape[:2]
-    blob = cv2.dnn.blobFromImage(cv2.resize(image, (300, 300)), 0.007843, (300, 300), 127.5)
 
-    # pass the blob through the network and obtain the detections and predictions
-    logger.debug("computing object detections...")
-    net.setInput(blob)
-    detections = net.forward()
+    if conf['objdetection_framework'] == 'detectron2':
+        found_objects, image = detectron2.do_detections(conf, cp, img_attachment)
+    else:
+        assert conf['objdetection_framework'] == 'opencv_mobilenetssd'
+        found_objects, image = opencv_mobilenetssd.do_detections(conf, cp, img_attachment)
 
-    # loop over the detections
-    found_objects = []
-    for i in np.arange(0, detections.shape[2]):
-        # extract the confidence (i.e., probability) associated with the prediction
-        confidence = detections[0, 0, i, 2]
-
-        # filter out weak detections by ensuring the `confidence` is
-        # greater than the minimum confidence
-        idx = int(detections[0, 0, i, 1])
-        if MODEL_CLASSES[idx] != 'background':
-            logger.debug("Initial object {} identified with confidence of {:.2f}%".format(
-                MODEL_CLASSES[idx], confidence * 100))
-        if confidence > conf['min_confidence']:
-            # extract the index of the class label from the `detections`,
-            # then compute the (x, y)-coordinates of the bounding box for the object
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            (startX, startY, endX, endY) = box.astype("int")
-
-            # display the prediction
-            label = "{}: {:.2f}%".format(MODEL_CLASSES[idx], confidence * 100)
-            found_objects.append((MODEL_CLASSES[idx], confidence * 100))
-            logger.info("TAGGED: {}".format(label))
-            cv2.rectangle(image, (startX, startY), (endX, endY),
-                MODEL_COLORS[idx], 2)
-            y = startY - 15 if startY - 15 > 15 else startY + 15
-            cv2.putText(image, label, (startX, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, MODEL_COLORS[idx], 2)
+    # print out all found objects
+    for i, (category, confidence) in enumerate(found_objects):
+        logger.info("{}: '{}' identified with confidence of {:.2f}% ({})".format(
+            i, category, confidence * 100,
+            'USING' if confidence >= conf['min_confidence']
+                and category in conf['notify_on_dataset_categories'] else 'NOT USING'))
 
     # see if we should notify
-    if not any([e[0] in conf['model_classes'] and e[0] != 'background' for e in found_objects]):
-        logger.info("Not notifying as found classes do not match what we are looking for (found: {}, looking for: {})".format(
-            ', '.format([e[0] for e in found_classes]), ', '.format(conf['model_classes'])))
+    to_notify = any([e[0] in conf['notify_on_dataset_categories'] for e in found_objects])
+    if not to_notify:  #no recognitions over the confidence threshold
+        if not found_objects:
+            logger.info("Not notifying as no found objects")
+        else:
+            logger.info("Not notifying as found objects not what we are looking for -- FOUND: {} -- WANTED: {}".format(
+                ', '.join([e[0] for e in found_objects]), ', '.join(conf['notify_on_dataset_categories'])))
         sys.exit(0)
 
     camera_name = conf['camera_names'].get(parsed_email['from'], parsed_email['from'])
@@ -294,15 +269,28 @@ def main():
             utc_now_epoch - state['last_notify'][camera_name], conf['min_notify_period']))
         sys.exit(0)
 
-    image_encode = cv2.imencode('.jpg', image)[1]
-    str_encode = np.array(image_encode).tostring()
+    # convert image over to a jpg string format
+    successful_encode = False    
+    for i, quality in enumerate([85, 50]):
+        image_encode = cv2.imencode('.jpg', image,
+            [cv2.IMWRITE_JPEG_QUALITY, quality, cv2.IMWRITE_JPEG_OPTIMIZE, 1, cv2.IMWRITE_JPEG_LUMA_QUALITY, quality])[1]
+        image_str_encode = np.array(image_encode).tostring()
+        if len(image_str_encode) >= PUSHOVER_MAX_ATTACHMENT_SIZE:
+            logger.warn("Image size of {} too large for attachment with quality {} (max allowed: {})...".format(
+                convert_size(len(image_str_encode)), quality, convert_size(PUSHOVER_MAX_ATTACHMENT_SIZE)))
+        else:
+            successful_encode = True
+            break
+    if not successful_encode:
+        raise Exception("Image size still too large for attachment.")
+    logger.debug("Resultant JPEG size: {}".format(convert_size(len(image_str_encode))))
 
     # notify via pushover
     c = pushover.Client(conf['pushover_user_key'], api_token=conf['pushover_api_token'])
     found_objects_str = ', '.join(['{} ({:.2f}%)'.format(e[0], e[1]) for e in found_objects])
     c.send_message("Identified {}".format(found_objects_str),
-        title="{} Oddspot Alert".format(camera_name), attachment=('capture.jpg', str_encode))
-    logger.info("Sent image (size: {} bytes) via pushover".format(len(str_encode)))
+        title="{} Oddspot Alert".format(camera_name), attachment=('capture.jpg', image_str_encode))
+    logger.info("Alert sent via pushover")
 
     # update state
     state['last_notify'][camera_name] = utc_now_epoch
