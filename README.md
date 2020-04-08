@@ -10,11 +10,15 @@ Uses MobileNet NN to locate and notify security cam images based on presence of 
 
 These instructions are for a stock Ubuntu 18.04 LTS system.
 
+If you are doing analysis with a NVIDIA GPU, make sure you install both the NVIDIA drivers and the [CUDA toolkit](https://developer.nvidia.com/cuda-zone).
+[Here](https://www.pugetsystems.com/labs/hpc/How-to-install-CUDA-9-2-on-Ubuntu-18-04-1184/) is a guide for Ubuntu 18.04.
+
 Install dependencies:
 ```
 sudo apt-get -y install postfix gcc g++ python3 python3-setuptools mailutils
 sudo pip3 install python-pushover numpy opencv-contrib-python-headless torch torchvision
 sudo pip3 install cython; sudo pip3 install 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
+sudo pip3 install 'git+https://github.com/facebookresearch/detectron2.git'
 ```
 
 Set up Postfix to run our script on an incoming email to `oddspot@<OUR SERVER>` (**change the text surrounded by `<>` (e.g. `<USER>`) as appropriate**):
@@ -48,16 +52,16 @@ camera_names={"local@smtp01.localnet": "testcam", "root@cam-front.localnet": "ca
 objdetection_framework=detectron2
 
 #notify_dataset_classes: object labels/classes to notify on
-notify_dataset_classes=bus,car,motorcycle,person
+notify_dataset_classes=bus,car,motorcycle,person,truck
 
 #detectron2_config_file: detectron2 config file to use.
 # See options at: https://github.com/facebookresearch/detectron2/tree/master/configs
 #detectron2_config_file=configs/quick_schedules/mask_rcnn_R_50_FPN_inference_acc_test.yaml
 
 #detectron2_extra_opts: Extra configuration options sent to detectron2
-# defaults to: "MODEL.DEVICE cpu"
+# defaults to: MODEL.DEVICE cpu
 # Uncomment the line below to run on an NVIDIA GPU via CUDA
-#detectron2_extra_opts="MODEL.DEVICE cuda"
+#detectron2_extra_opts=MODEL.DEVICE cuda
 # (Other GPU options are: mkldnn, opengl, opencl, ideep, hip, msnpu)
 ```
 
@@ -72,3 +76,22 @@ Tail `/var/log/mail.log` and `/home/<USER>/oddspot/logs/oddspot.log` to see if p
 ## Usage
 
 Modify your camera setup (via its embedded web configuration page) to send an email to `oddspot@<YOURMACHINE>` on motion detection events. Make sure it attaches a snapshot of the event in jpeg or png format (and _not_ a video). Also, to avoid flooding the script, you should probably have it so that it will only send repeat emails every minute or more. The `oddspot` script allows you to further limit continuous emails on a per camera basis via the `min_notify_period` config setting, but it should get raw emails from the cameras on motion events more frequently than that, to maximize alerting accuracy).
+
+
+## Usage with a CUDA capable GPU
+
+If you have a CUDA-capable NVIDIA GPU installed in your system, `oddspot` can work with it if using the `detectron2` framework. 
+
+If using Ubuntu, install the CUDA drivers:
+```
+sudo add-apt-repository ppa:graphics-drivers/ppa
+sudo apt-get update
+sudo apt-get install nvidia-driver-440
+```
+
+Add (or uncomment) the following line in your `oddspot.ini` file:
+```
+detectron2_extra_opts=MODEL.DEVICE cuda
+```
+
+Then reboot your system for the driver to be properly loaded.
