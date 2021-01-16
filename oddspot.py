@@ -21,6 +21,9 @@ import atexit
 import signal
 from builtins import str
 
+from memory_profiler import profile
+import objgraph
+
 import pushover
 import torch
 import cv2
@@ -30,6 +33,9 @@ from aiosmtpd.controller import Controller as AiosmtpdController
 import util
 from objdetection import detectron2, opencv_mobilenetssd
 
+# memory leak tracing
+import tracemalloc
+tracemalloc.start()
 
 PROG_NAME = "oddspot"
 CURDIR = os.path.dirname(os.path.realpath(__file__))
@@ -47,9 +53,6 @@ PUSHOVER_MAX_ATTACHMENT_SIZE = 2621440  # 2.5MB
 
 # globals
 logger = logging.getLogger(__name__)
-utc_now = datetime.datetime.utcnow()
-utc_now_epoch_timestamp = utc_now.timestamp()
-utc_now_epoch = int(utc_now_epoch_timestamp)  # second precision
 conf = None
 state = None
 cleanup_called = False
@@ -91,6 +94,15 @@ def load_config():
         conf['sender_camera_names'] = json.loads(conf['sender_camera_names'])
     assert isinstance(conf['sender_camera_names'], dict)
 
+    # section: integrations
+    conf['platerecognizer_api_key'] = cp.get('integrations', 'platerecognizer_api_key').strip()
+    conf['platerecognizer_regions_hint'] = cp.get('integrations', 'platerecognizer_regions_hint')
+    if conf['platerecognizer_regions_hint']:
+        conf['platerecognizer_regions_hint'] = json.loads(conf['platerecognizer_regions_hint'])
+    else:
+        conf['platerecognizer_regions_hint'] = []
+    assert isinstance(conf['platerecognizer_regions_hint'], (list, tuple))
+
     return conf, cp
 
 def handle_exception(type, value, tb):
@@ -129,7 +141,7 @@ class SMTPDHandler:
         self.processing_queue.put(envelope)
         return '250 Message accepted for delivery'
 
-def email_worker(thread_index, processing_queue, detector):
+def email_worker_iter(thread_index, processing_queue, detector):
     global conf, state
 
     worker_logger = logging.getLogger()
@@ -137,93 +149,134 @@ def email_worker(thread_index, processing_queue, detector):
     #formatter = logging.Formatter('worker{}')
     #file_handler.setFormatter(formatter)
 
-    while True:
-        logger.debug("worker{:02}: Waiting on mail message...".format(thread_index))
-        # block until we have a new incoming message
-        envelope = processing_queue.get()
-        if envelope is None:  #main thread is telling us to stop
-            logger.debug("worker{:02}: Thread received sign to terminate".format(thread_index))
-            return
-    
-        email_str = envelope.content.decode('utf8', errors='replace')
-        parsed_email = util.email_parse(email_str)
-    
-        # parse the raw image data out of the email
-        logger.info("worker{:02}: Email from: '{}', subject: '{}'".format(thread_index, parsed_email['from'], parsed_email['subject']))
-        logger.info("worker{:02}: Email has {} attachments: {}".format(thread_index, len(parsed_email['attachments']),
-            ', '.join(['{}: {} (size: {}) ({})'.format(i, a.content_type, util.convert_size(a.size), 'USING' if i==0 else 'NOT USING')
-                for i, a in enumerate(parsed_email['attachments'])]) if len(parsed_email['attachments']) else 'N/A'))
-        if not parsed_email['attachments'] or parsed_email['attachments'][0].content_type not in ('application/octet-stream', 'image/jpeg', 'image/png'):
-            logger.warn("worker{:02}: Cannot parse out image from email".format(thread_index))
-            continue
-        # use first attachment
-        img_attachment = parsed_email['attachments'][0]
-        img_attachment.seek(0)  # just in case
+    logger.debug("worker{:02}: Waiting on mail message...".format(thread_index))
+    logger.debug("state is: {}".format(state))
+    # block until we have a new incoming message
+    envelope = processing_queue.get()
+    if envelope is None:  #main thread is telling us to stop
+        logger.debug("worker{:02}: Thread received sign to terminate".format(thread_index))
+        return False
 
-        #perform detection
-        if conf['objdetection_framework'] == 'detectron2':
-            found_objects, image = detector.do_detections(img_attachment)
+    email_str = envelope.content.decode('utf8', errors='replace')
+    parsed_email = util.email_parse(email_str)
+
+    # parse the raw image data out of the email
+    logger.info("worker{:02}: Email from: '{}', subject: '{}'".format(thread_index, parsed_email['from'], parsed_email['subject']))
+    logger.info("worker{:02}: Email has {} attachments: {}".format(thread_index, len(parsed_email['attachments']),
+        ', '.join(['{}: {} (size: {}) ({})'.format(i, a.content_type, util.convert_size(a.size), 'USING' if i==0 else 'NOT USING')
+            for i, a in enumerate(parsed_email['attachments'])]) if len(parsed_email['attachments']) else 'N/A'))
+    if not parsed_email['attachments'] or parsed_email['attachments'][0].content_type not in ('application/octet-stream', 'image/jpeg', 'image/png'):
+        logger.warn("worker{:02}: Cannot parse out image from email".format(thread_index))
+        return True
+    # use first attachment
+    img_attachment = parsed_email['attachments'][0]
+    img_attachment.seek(0)  # just in case
+
+    #perform detection
+    if conf['objdetection_framework'] == 'detectron2':
+        found_objects, image = detector.do_detections(img_attachment)
+    else:
+        assert conf['objdetection_framework'] == 'opencv_mobilenetssd'
+        found_objects, image = detector.do_detections(conf['min_confidence'], img_attachment)
+
+    # print out all found objects
+    for i, (category, confidence) in enumerate(found_objects):
+        logger.info("worker{:02}: {}: '{}' identified with confidence of {:.2f}% ({})".format(
+            thread_index,
+            i, category, confidence * 100.0,
+            'USING' if confidence >= conf['min_confidence']
+                and category in conf['notify_on_dataset_categories'] else 'NOT USING'))
+
+    found_objects_str = ', '.join([e[0] for e in found_objects])
+    found_objects_str_with_confidence = ', '.join(['{} ({:.2f}%)'.format(e[0], e[1] * 100.0) for e in found_objects])
+
+    # see if we should notify
+    utc_now = datetime.datetime.utcnow()
+    utc_now_epoch_timestamp = utc_now.timestamp()
+    utc_now_epoch = int(utc_now_epoch_timestamp)  # second precision
+    to_notify = any([e[0] in conf['notify_on_dataset_categories'] for e in found_objects])
+    if not to_notify:  #no recognitions over the confidence threshold
+        if not found_objects:
+            logger.info("worker{:02}: Not notifying as no found objects".format(thread_index))
         else:
-            assert conf['objdetection_framework'] == 'opencv_mobilenetssd'
-            found_objects, image = detector.do_detections(conf['min_confidence'], img_attachment)
+            logger.info("worker{:02}: Not notifying as no suitable found objects -- FOUND: {} -- WANTED: {}".format(
+                thread_index, found_objects_str, ', '.join(conf['notify_on_dataset_categories'])))
+        return True
 
-        # print out all found objects
-        for i, (category, confidence) in enumerate(found_objects):
-            logger.info("worker{:02}: {}: '{}' identified with confidence of {:.2f}% ({})".format(
-                thread_index,
-                i, category, confidence * 100,
-                'USING' if confidence >= conf['min_confidence']
-                    and category in conf['notify_on_dataset_categories'] else 'NOT USING'))
+    camera_name = conf['sender_camera_names'].get(parsed_email['from'], parsed_email['from'])
+    state['last_notify'].setdefault(camera_name, False)
+    assert state['last_notify'][camera_name] is False or utc_now_epoch - state['last_notify'][camera_name] >= 0
+    if state['last_notify'][camera_name] is not False and utc_now_epoch - state['last_notify'][camera_name] < conf['min_notify_period']:
+        logger.info("worker{:02}: Not notifying as last notification for this camera is {} seconds ago (needs to be >= {} seconds)".format(
+            thread_index, utc_now_epoch - state['last_notify'][camera_name], conf['min_notify_period']))
+        return True
 
-        # see if we should notify
-        to_notify = any([e[0] in conf['notify_on_dataset_categories'] for e in found_objects])
-        if not to_notify:  #no recognitions over the confidence threshold
-            if not found_objects:
-                logger.info("worker{:02}: Not notifying as no found objects".format(thread_index))
-            else:
-                logger.info("worker{:02}: Not notifying as no suitable found objects -- FOUND: {} -- WANTED: {}".format(
-                    thread_index, ', '.join([e[0] for e in found_objects]), ', '.join(conf['notify_on_dataset_categories'])))
-            continue
+    # convert image over to a jpg string format
+    successful_encode = False    
+    for i, quality in enumerate([85, 50]):
+        image_encode = cv2.imencode('.jpg', image,
+            [cv2.IMWRITE_JPEG_QUALITY, quality, cv2.IMWRITE_JPEG_OPTIMIZE, 1, cv2.IMWRITE_JPEG_LUMA_QUALITY, quality])[1]
+        image_str_encode = np.array(image_encode).tostring()
+        if len(image_str_encode) >= PUSHOVER_MAX_ATTACHMENT_SIZE:
+            logger.warn("worker{:02}: Image size of {} too large for attachment with quality {} (max allowed: {})...".format(
+                thread_index, util.convert_size(len(image_str_encode)), quality, util.convert_size(PUSHOVER_MAX_ATTACHMENT_SIZE)))
+        else:
+            successful_encode = True
+            break
+    if not successful_encode:
+        logger.warn("worker{:02}: Image size still too large for attachment.".format(thread_index))
+        return True
+    logger.debug("worker{:02}: Resultant JPEG size: {}".format(thread_index, util.convert_size(len(image_str_encode))))
 
-        camera_name = conf['sender_camera_names'].get(parsed_email['from'], parsed_email['from'])
-        state['last_notify'].setdefault(camera_name, False)
-        assert state['last_notify'][camera_name] is False or utc_now_epoch - state['last_notify'][camera_name] >= 0
-        if state['last_notify'][camera_name] is not False and utc_now_epoch - state['last_notify'][camera_name] < conf['min_notify_period']:
-            logger.info("worker{:02}: Not notifying as last notification for this camera is {} seconds ago (needs to be >= {} seconds)".format(
-                thread_index, utc_now_epoch - state['last_notify'][camera_name], conf['min_notify_period']))
-            continue
+    # run platerecognizer on images that have vehicles
+    run_platerecognizer = False
+    platerecognizer_info = []
+    for found_object in [e[0] for e in found_objects]:
+        if found_object in ('car', 'truck', 'bus'):
+            run_platerecognizer = True
+            break
+    if conf['platerecognizer_api_key'] and run_platerecognizer:
+        r = requests.post('https://api.platerecognizer.com/v1/plate-reader/', data=dict(regions=conf['platerecognizer_regions_hint']),
+            files=dict(upload=image_str_encode), headers={'Authorization': 'Token ' + conf['platerecognizer_api_key']})
+        if r.status_code not in (200, 201):
+            logger.info("Invalid Platerecognizer response: {}".format(r.text))
+            try:
+                error_detail = r.json()['detail']
+            except:
+                error_detail = "UNKNOWN ERROR"
+            platerecognizer_info.append("Platerecognizer API error: {}".format(error_detail))
+        else:
+            for vehicle in r.json()['results']:
+                platerecognizer_info.append("Plate {}: {}, {}, conf {}".format(
+                    vehicle['plate'], vehicle['region']['code'], vehicle['vehicle']['type'], vehicle['score']))
 
-        # convert image over to a jpg string format
-        successful_encode = False    
-        for i, quality in enumerate([85, 50]):
-            image_encode = cv2.imencode('.jpg', image,
-                [cv2.IMWRITE_JPEG_QUALITY, quality, cv2.IMWRITE_JPEG_OPTIMIZE, 1, cv2.IMWRITE_JPEG_LUMA_QUALITY, quality])[1]
-            image_str_encode = np.array(image_encode).tostring()
-            if len(image_str_encode) >= PUSHOVER_MAX_ATTACHMENT_SIZE:
-                logger.warn("worker{:02}: Image size of {} too large for attachment with quality {} (max allowed: {})...".format(
-                    thread_index, util.convert_size(len(image_str_encode)), quality, util.convert_size(PUSHOVER_MAX_ATTACHMENT_SIZE)))
-            else:
-                successful_encode = True
-                break
-        if not successful_encode:
-            logger.warn("worker{:02}: Image size still too large for attachment.".format(thread_index))
-            continue
-        logger.debug("worker{:02}: Resultant JPEG size: {}".format(thread_index, util.convert_size(len(image_str_encode))))
+    # notify via pushover
+    c = pushover.Client(conf['pushover_user_key'], api_token=conf['pushover_api_token'])
+    c.send_message("Identified {}{}".format(found_objects_str_with_confidence,
+        (' (' + ', '.join([vehicle for vehicle in platerecognizer_info]) + ')') if run_platerecognizer and platerecognizer_info else ''),
+        title="{} Oddspot Alert".format(camera_name), attachment=('capture.jpg', image_str_encode))
+    logger.info("worker{:02}: Alert sent via pushover".format(thread_index))
 
-        # notify via pushover
-        c = pushover.Client(conf['pushover_user_key'], api_token=conf['pushover_api_token'])
-        found_objects_str = ', '.join(['{} ({:.2f}%)'.format(e[0], e[1]) for e in found_objects])
-        c.send_message("Identified {}".format(found_objects_str),
-            title="{} Oddspot Alert".format(camera_name), attachment=('capture.jpg', image_str_encode))
-        logger.info("worker{:02}: Alert sent via pushover".format(thread_index))
+    # update state (will be dumped via atexit handlers)
+    state['last_notify'][camera_name] = utc_now_epoch
 
-        # update state (will be dumped via atexit handlers)
-        state['last_notify'][camera_name] = utc_now_epoch
+    # signal processing of this queue item is done
+    processing_queue.task_done()
+    return True
 
-        # signal processing of this queue item is done
-        processing_queue.task_done()
+def email_worker_loop(thread_index, processing_queue, detector):
+    while email_worker_iter(thread_index, processing_queue, detector):
+        #objgraph.show_most_common_types(limit=50)
+        #objgraph.show_growth(limit=20)
+        #pass
 
-def terminate_workers_and_cleanup(logger, aiosmtpd_controller, num_worker_threads, processing_queue):
+        snapshot = tracemalloc.take_snapshot()
+        top_stats = snapshot.statistics('lineno')
+        logger.info("[ Top 10 ]")
+        for stat in top_stats[:10]:
+            logger.info(stat)
+
+def terminate_workers_and_cleanup(logger, aiosmtpd_controller, num_worker_threads, processing_queue, signal=None, frame=None):
     # NOTE: we have this cleanup_called variable because of an odd situation where registering this via atexit.register
     # will not call it on SIGTERM (e.g. when shut down via `systemctl stop`), but when registering this via
     # signal.register for SIGTERM and atexit.register, this handler gets called two consecutive times at SIGTERM
@@ -232,7 +285,9 @@ def terminate_workers_and_cleanup(logger, aiosmtpd_controller, num_worker_thread
     if cleanup_called:
         return
 
-    logger.debug("Program termination. Shutting down worker threads and cleaning up...")
+    logger.debug("Program termination. Shutting down worker threads and cleaning up...(signal: {})".format(signal))
+    if frame:
+        logger.debug(traceback.format_stack(frame))
 
     for i in range(num_worker_threads):
         processing_queue.put(None)
@@ -305,14 +360,14 @@ def main():
             assert conf['objdetection_framework'] == 'opencv_mobilenetssd'
             detector = opencv_mobilenetssd.Detector(conf, cp)
 
-        t = threading.Thread(target=email_worker, args=(thread_index, processing_queue, detector))
+        t = threading.Thread(target=email_worker_loop, args=(thread_index, processing_queue, detector))
         t.start()
         threads.append(t)
     logger.info("Started {} worker threads {}".format(num_worker_threads, threads))
     
     # register via signal.signal for SIGTERM (e.g. via `systemctl stop`) as well as non-SIGTERM (via atexit.register)
     signal.signal(signal.SIGTERM, lambda signal, frame: terminate_workers_and_cleanup(
-        logger, aiosmtpd_controller, num_worker_threads, processing_queue))
+        logger, aiosmtpd_controller, num_worker_threads, processing_queue, signal=signal, frame=frame))
     atexit.register(terminate_workers_and_cleanup, logger, aiosmtpd_controller, num_worker_threads, processing_queue)
 
     # Wait for all worker threads to finish (will normally sit forever,
@@ -326,3 +381,4 @@ def main():
         
 if __name__ == "__main__":
     main()
+        

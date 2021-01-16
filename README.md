@@ -6,19 +6,21 @@ Uses MobileNet NN to locate and notify security cam images based on presence of 
 * Neural net code originally taken from [here](https://www.pyimagesearch.com/2017/09/11/object-detection-with-deep-learning-and-opencv/).
 * Email parsing originally from [here](https://www.ianlewis.org/en/parsing-email-attachments-python).
 
-## Setup (Ubuntu 18.04)
+## Setup (Ubuntu 20.04 LTS)
 
-These instructions are for a stock Ubuntu 18.04 LTS system.
-
-If you are doing analysis with a NVIDIA GPU, make sure you install both the NVIDIA drivers and the [CUDA toolkit](https://developer.nvidia.com/cuda-zone).
-[Here](https://www.pugetsystems.com/labs/hpc/How-to-install-CUDA-9-2-on-Ubuntu-18-04-1184/) is a guide for Ubuntu 18.04.
+These instructions are for a stock Ubuntu 20.04 LTS system.
 
 Install dependencies:
 ```
 sudo apt-get -y install gcc g++ python3 python3-setuptools sendemail
-sudo pip3 install python-pushover numpy opencv-contrib-python-headless torch torchvision
+sudo pip3 install python-pushover numpy opencv-contrib-python-headless torch torchvision aiosmtpd
 sudo pip3 install cython; sudo pip3 install 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
 sudo pip3 install 'git+https://github.com/facebookresearch/detectron2.git'
+```
+
+If you are doing analysis with a NVIDIA GPU, also run this command to install the CUDA toolkit:
+```
+sudo apt-get -y install nvidia-cuda-toolkit
 ```
 
 ## Sample config
@@ -62,6 +64,11 @@ listen_port = 10025
 
 #sender_camera_names: a JSON object that maps the From email address of the sending camera to a name that will show in the notification for it
 sender_camera_names={"local@smtp01.localnet": "testcam", "root@cam-front.localnet": "cam-front", "root@cam-back.localnet": "cam-back"}
+
+[integrations]
+platerecognizer_api_key=<YOUR PLATERECOGNIZER.COM API KEY HERE OR BLANK TO DISABLE>
+#platerecognizer_regions_hint: array of platerecognizer reagons codes to provide as a hint to the object recognizer (blank or empty array to disable)
+platerecognizer_regions_hint=["us-nc", "us-va"]
 ```
 
 ## Testing
@@ -112,7 +119,7 @@ If using Ubuntu, install the CUDA drivers:
 ```
 sudo add-apt-repository ppa:graphics-drivers/ppa
 sudo apt-get update
-sudo apt-get install nvidia-driver-440
+sudo apt-get install nvidia-driver-460
 ```
 
 Add (or uncomment) the following line in your `oddspot.ini` file:
