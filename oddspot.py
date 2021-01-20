@@ -216,7 +216,7 @@ def email_worker_iter(thread_index, processing_queue, detector):
     for i, quality in enumerate([85, 50]):
         image_encode = cv2.imencode('.jpg', image,
             [cv2.IMWRITE_JPEG_QUALITY, quality, cv2.IMWRITE_JPEG_OPTIMIZE, 1, cv2.IMWRITE_JPEG_LUMA_QUALITY, quality])[1]
-        image_str_encode = np.array(image_encode).tostring()
+        image_str_encode = np.array(image_encode).tobytes()
         if len(image_str_encode) >= PUSHOVER_MAX_ATTACHMENT_SIZE:
             logger.warn("worker{:02}: Image size of {} too large for attachment with quality {} (max allowed: {})...".format(
                 thread_index, util.convert_size(len(image_str_encode)), quality, util.convert_size(PUSHOVER_MAX_ATTACHMENT_SIZE)))
@@ -236,8 +236,10 @@ def email_worker_iter(thread_index, processing_queue, detector):
             run_platerecognizer = True
             break
     if conf['platerecognizer_api_key'] and run_platerecognizer:
+        #send the original image to platerecognizer, as any shading/flagging by detectron2 will reduce recognition accuracy
+        img_attachment.seek(0)  # just in case
         r = requests.post('https://api.platerecognizer.com/v1/plate-reader/', data=dict(regions=conf['platerecognizer_regions_hint']),
-            files=dict(upload=image_str_encode), headers={'Authorization': 'Token ' + conf['platerecognizer_api_key']})
+            files=dict(upload=img_attachment), headers={'Authorization': 'Token ' + conf['platerecognizer_api_key']})
         if r.status_code not in (200, 201):
             logger.info("Invalid Platerecognizer response: {}".format(r.text))
             try:
