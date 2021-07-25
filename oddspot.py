@@ -19,6 +19,7 @@ import queue
 import threading
 import atexit
 import signal
+import socket
 from builtins import str
 
 from memory_profiler import profile
@@ -131,7 +132,9 @@ class SMTPDHandler:
         logging.getLogger('mail.log').setLevel(logging.WARN)
 
     async def handle_RCPT(self, server, session, envelope, address, rcpt_options):
-        if address.lower() != 'oddspot@localhost':
+        allowed_addresses = ('oddspot@localhost', 'oddspot@localhost.localdomain', 'oddspot@{}'.format(socket.gethostname()), 'oddspot@{}'.format(socket.getfqdn()))
+        if address.lower() not in allowed_addresses:
+            logger.debug("not relaying message to {} (allowed recipients are: {})".format(address.lower(), ', '.join(allowed_addresses)))
             return '550 not relaying to that user and domain'
         envelope.rcpt_tos.append(address)
         return '250 OK'
