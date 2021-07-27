@@ -62,13 +62,18 @@ notify_on_dataset_categories=bus,car,motorcycle,person,truck
 listen_host =
 listen_port = 10025
 
-#sender_camera_names: a JSON object that maps the From email address of the sending camera to a name that will show in the notification for it
-sender_camera_names={"local@smtp01.localnet": "testcam", "root@cam-front.localnet": "cam-front", "root@cam-back.localnet": "cam-back"}
-
 [integrations]
 platerecognizer_api_key=<YOUR PLATERECOGNIZER.COM API KEY HERE OR BLANK TO DISABLE>
 #platerecognizer_regions_hint: array of platerecognizer reagons codes to provide as a hint to the object recognizer (blank or empty array to disable)
 platerecognizer_regions_hint=["us-nc", "us-va"]
+
+[cameras]
+#camera_names_from_sender: a JSON object that maps the From email address of the sending camera to a name that will show in the notification for it
+camera_names_from_sender={"local@smtp01.localnet": "testcam", "root@cam-front.localnet": "cam-front", "root@cam-back.localnet": "cam-back"}
+#camera_custom_configs: a JSON dict of dicts -- totally optional. Main dict keys are camera names. For each supplied camera name, certain options can be specified
+# currently available options:
+#   - always_notify: specify as true to always notify, regardless of image analysis results -- useful if the camera in question does its own advanced analysis
+camera_custom_configs={"testcam": {"always_notify": true}}
 ```
 
 ## Testing

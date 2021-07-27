@@ -90,11 +90,6 @@ def load_config():
     # ^ use '' to bind dual stack (ipv4 and v6) on all interfaces, by default
     conf['smtp_listen_port'] = cp.getint('smtpd', 'listen_port')
 
-    conf['sender_camera_names'] = cp.get('smtpd', 'sender_camera_names', fallback={})
-    if conf['sender_camera_names']:
-        conf['sender_camera_names'] = json.loads(conf['sender_camera_names'])
-    assert isinstance(conf['sender_camera_names'], dict)
-
     # section: integrations
     conf['platerecognizer_api_key'] = cp.get('integrations', 'platerecognizer_api_key').strip()
     conf['platerecognizer_regions_hint'] = cp.get('integrations', 'platerecognizer_regions_hint')
@@ -103,6 +98,17 @@ def load_config():
     else:
         conf['platerecognizer_regions_hint'] = []
     assert isinstance(conf['platerecognizer_regions_hint'], (list, tuple))
+
+    # section: cameras
+    conf['camera_names_from_sender'] = cp.get('cameras', 'camera_names_from_sender', fallback={})
+    if not conf['camera_names_from_sender']:
+        raise Exception('camera_names_from_sender must be defined')
+    conf['camera_names_from_sender'] = json.loads(conf['camera_names_from_sender'])
+    assert isinstance(conf['camera_names_from_sender'], dict)
+
+    conf['camera_custom_configs'] = cp.get('cameras', 'camera_custom_configs', fallback={})
+    conf['camera_custom_configs'] = json.loads(conf['camera_custom_configs'])
+    assert isinstance(conf['camera_custom_configs'], dict)
 
     return conf, cp
 
@@ -160,6 +166,10 @@ def email_worker_iter(thread_index, processing_queue, detector):
         logger.debug("worker{:02}: Thread received sign to terminate".format(thread_index))
         return False
 
+    utc_now = datetime.datetime.utcnow()
+    utc_now_epoch_timestamp = utc_now.timestamp()
+    utc_now_epoch = int(utc_now_epoch_timestamp)  # second precision
+
     email_str = envelope.content.decode('utf8', errors='replace')
     parsed_email = util.email_parse(email_str)
 
@@ -174,6 +184,25 @@ def email_worker_iter(thread_index, processing_queue, detector):
     # use first attachment
     img_attachment = parsed_email['attachments'][0]
     img_attachment.seek(0)  # just in case
+
+    # determine which camera sent us this image (using the entire from email address if no friendly name in 'camera_names_from_sender')
+    camera_name = conf['camera_names_from_sender'].get(parsed_email['from'], parsed_email['from'])
+    state['last_notify'].setdefault(camera_name, False)
+    logger.info("worker{:02}: Identified camera as {}".format(thread_index, camera_name))
+
+    # see if we should even run image analysis
+    assert state['last_notify'][camera_name] is False or utc_now_epoch - state['last_notify'][camera_name] >= 0
+    if state['last_notify'][camera_name] is not False and utc_now_epoch - state['last_notify'][camera_name] < conf['min_notify_period']:
+        logger.info("worker{:02}: Skipping image analysis as last notification for this camera is {} seconds ago (needs to be >= {} seconds)".format(
+            thread_index, utc_now_epoch - state['last_notify'][camera_name], conf['min_notify_period']))
+        return True
+
+    # see if we should always forward the image along...
+    always_notify = False
+    if camera_name in conf['camera_custom_configs'] and conf['camera_custom_configs'][camera_name].get('always_notify', False):
+        logger.info("worker{:02}: Notifying on image irregardless of analysis (always_notify option enabled for this camera '{}')".format(
+            thread_index, camera_name))
+        always_notify = True
 
     #perform detection
     if conf['objdetection_framework'] == 'detectron2':
@@ -193,25 +222,14 @@ def email_worker_iter(thread_index, processing_queue, detector):
     found_objects_str = ', '.join([e[0] for e in found_objects])
     found_objects_str_with_confidence = ', '.join(['{} ({:.2f}%)'.format(e[0], e[1] * 100.0) for e in found_objects])
 
-    # see if we should notify
-    utc_now = datetime.datetime.utcnow()
-    utc_now_epoch_timestamp = utc_now.timestamp()
-    utc_now_epoch = int(utc_now_epoch_timestamp)  # second precision
+    # see if we should notify (based on found objects)
     to_notify = any([e[0] in conf['notify_on_dataset_categories'] for e in found_objects])
-    if not to_notify:  #no recognitions over the confidence threshold
+    if not to_notify and not always_notify:  #no recognitions over the confidence threshold
         if not found_objects:
             logger.info("worker{:02}: Not notifying as no found objects".format(thread_index))
         else:
             logger.info("worker{:02}: Not notifying as no suitable found objects -- FOUND: {} -- WANTED: {}".format(
                 thread_index, found_objects_str, ', '.join(conf['notify_on_dataset_categories'])))
-        return True
-
-    camera_name = conf['sender_camera_names'].get(parsed_email['from'], parsed_email['from'])
-    state['last_notify'].setdefault(camera_name, False)
-    assert state['last_notify'][camera_name] is False or utc_now_epoch - state['last_notify'][camera_name] >= 0
-    if state['last_notify'][camera_name] is not False and utc_now_epoch - state['last_notify'][camera_name] < conf['min_notify_period']:
-        logger.info("worker{:02}: Not notifying as last notification for this camera is {} seconds ago (needs to be >= {} seconds)".format(
-            thread_index, utc_now_epoch - state['last_notify'][camera_name], conf['min_notify_period']))
         return True
 
     # convert image over to a jpg string format
