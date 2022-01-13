@@ -24,9 +24,6 @@ import socket
 import random
 from builtins import str
 
-from memory_profiler import profile
-import objgraph
-
 import pushover
 import torch
 import cv2
@@ -35,10 +32,12 @@ import numpy as np
 from aiosmtpd.controller import Controller as AiosmtpdController
 from deepstack_sdk import ServerConfig, Detection
 
-import util
-
-# memory leak tracing
+# memory usage profiling
 import tracemalloc
+#from memory_profiler import profile
+#import objgraph
+
+import util
 
 PROG_NAME = "oddspot"
 CURDIR = os.path.dirname(os.path.realpath(__file__))
@@ -47,8 +46,6 @@ LOG_FILE = os.path.join(CURDIR, "logs", "{}.log".format(PROG_NAME))
 CONF_FILE = os.path.join(CURDIR, "{}.ini".format(PROG_NAME))
 
 DEFAULT_MIN_CONFIDENCE = 0.7  # 70%
-YOLOV5_MODEL_CHOICES = ('yolov5n', 'yolov5s', 'yolov5m', 'yolov5l', 'yolov5x','yolov5n6', 'yolov5s6', 'yolov5m6', 'yolov5l6', 'yolov5x6')
-DEFAULT_YOLOV5_MODEL = 'yolov5m'
 DEFAULT_MIN_NOTIFY_PERIOD = 600  # in seconds (600 = 10 minutes)
 PUSHOVER_MAX_ATTACHMENT_SIZE = 2621440  # 2.5MB
 PLATE_RECOGNIZER_ALLOWED_DETECTION_CATEGORIES = ('car', 'truck', 'bus', 'motorcycle')
@@ -72,12 +69,10 @@ def load_config():
     conf['min_confidence'] = cp.getfloat('detection', 'min_confidence', fallback=DEFAULT_MIN_CONFIDENCE)
     assert conf['min_confidence'] > 0.0 and conf['min_confidence'] <= 1.0
 
-    #conf['yolov5_model'] = cp.get('detection', 'yolov5_model', fallback=DEFAULT_YOLOV5_MODEL)
-    #if conf['yolov5_model'] not in YOLOV5_MODEL_CHOICES:
-    #    raise Exception("Invalid YOLOv5 model, must be one of: {}".format(', '.join(YOLOV5_MODEL_CHOICES)))
-
     conf['deepstack_api_port'] = cp.getint('detection', 'deepstack_api_port', fallback=DEEPSTACK_DEFAULT_API_PORT)
     assert conf['deepstack_api_port'] < 65535
+
+    conf['deepstack_custom_model'] = cp.get('detection', 'deepstack_custom_model', fallback=None)
 
     # section: notify
     conf['pushover_user_key'] = cp.get('notify', 'pushover_user_key')
@@ -241,17 +236,6 @@ def email_worker_iter(thread_index, processing_queue, detector):
         cv2.rectangle(image, (obj.x_min, y - text_h), (obj.x_min + text_w, y), text_color_bg, -1)
         #cv2.rectangle(image, (obj.x_min, y), (obj.x_min + text_w, y + text_h), text_color_bg, -1)
         cv2.putText(image, label, (obj.x_min, y), font, font_scale, color_fg, font_thickness, cv2.LINE_AA)
-
-    if False:
-        detection_results = detector(img_attachment)
-        detection_results.display(render=True)  # render detection boxes on image result
-        predictions = detection_results.pred[0].tolist()
-        #predictions is an array of results, with each result being an array with the following format:
-        # subscript 0,1,2,3 = x1, x2, y1, y2 (box bounds)
-        # subscript 4 = confidence (float between 0.0 and 1.0)
-        # subscript 5 = category (numerical)
-        found_objects = [(detector.names[int(e[5])], e[4]) for e in predictions]
-        image = cv2.cvtColor(detection_results.imgs[0], cv2.COLOR_BGR2RGB)  # color out of yolov5 rendering is BGR, but needs to be RGB
     
     # print out all found objects
     for i, (category, confidence) in enumerate(found_objects):
@@ -423,16 +407,9 @@ def main():
     threads = []
     for thread_index in range(num_worker_threads):
         # initialize detection engine
-        logger.info("worker{:02}: Initializaing yolov5 detection engine... (thread_index: {})".format(thread_index, thread_index))
-        
-        # load yolov5 dataset on appropriate device
-        #detector = torch.hub.load('ultralytics/yolov5', conf['yolov5_model'], device=torch.device(thread_index))
-        #logging.getLogger('yolov5').setLevel(logging.INFO)
-        # start thread for processing with this model
-        #t = threading.Thread(target=email_worker_loop, args=(thread_index, processing_queue, detector))
-
+        logger.info("worker{:02}: Initializaing detection engine connection... (thread_index: {})".format(thread_index, thread_index))
         deepstack_config = ServerConfig("http://localhost:{}".format(conf['deepstack_api_port']))
-        detector = Detection(deepstack_config)
+        detector = Detection(deepstack_config, name=conf['deepstack_custom_model'])
 
         t = threading.Thread(target=email_worker_loop, args=(thread_index, processing_queue, detector))
         t.start()

@@ -1,9 +1,5 @@
 # oddspot
-Uses yolov5 / COCONET to locate and notify security cam images based on presence of people, vehicles, and so on
-
-## Credits
-
-* Email parsing originally from [here](https://www.ianlewis.org/en/parsing-email-attachments-python).
+Daemon that listens for emails from cameras (with motion detection images attached) and uses [Deepstack](https://deepstack.cc/) to identify the presence of people, vehicles, et cetra and notify their existance via [Pushover](https://pushover.net/).
 
 ## Setup (Ubuntu 20.04 LTS)
 
@@ -37,15 +33,17 @@ sudo systemctl restart docker
 # test and make sure the GPU is visible from a docker container
 sudo docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
 
-# then install and run the deepstack container
+# then install and run the deepstack container on port 5000
 sudo docker pull deepquestai/deepstack:gpu-2021.09.1
-sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
+# in the command below, replace `/home/local/oddspot/` with your oddspot directory
+sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -v /home/local/oddspot/custom_models:/modelstore/detection -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
 ```
 
 Install and start deepstack (if using CPU):
 ```
 docker pull deepquestai/deepstack
-docker run -e VISION-DETECTION=True -v localstorage:/datastore -p 80:5000 -d --restart always deepquestai/deepstack
+# in the command below, replace `/home/local/oddspot/` with your oddspot directory
+docker run -e VISION-DETECTION=True -v localstorage:/datastore -v /home/local/oddspot/custom_models:/modelstore/detection -p 80:5000 -d --restart always deepquestai/deepstack
 ```
 
 
@@ -60,8 +58,7 @@ Create a file `oddspot.ini` within the `oddspot` base directory containing the f
 # e.g. 0.2 = 20%, 0.7 = 70%
 min_confidence=0.7
 
-#YOLOv5 model to use. One of: 'yolov5n', 'yolov5s', 'yolov5m', 'yolov5l', 'yolov5x','yolov5n6', 'yolov5s6', 'yolov5m6', 'yolov5l6', 'yolov5x6'
-yolov5_model = yolov5m
+deepstack_api_port=5000
 
 [notify]
 pushover_user_key=<YOUR USER KEY HERE>
