@@ -1,0 +1,2 @@
+yolov5* models from https://github.com/ultralytics/yolov5/releases/
+dark model from https://github.com/OlafenwaMoses/DeepStack_ExDark

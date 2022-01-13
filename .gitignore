@@ -132,3 +132,4 @@ dmypy.json
 oddspot.ini
 oddspot.dat
 logs/*
+custom_models/*.pt

@@ -58,7 +58,11 @@ Create a file `oddspot.ini` within the `oddspot` base directory containing the f
 # e.g. 0.2 = 20%, 0.7 = 70%
 min_confidence=0.7
 
-deepstack_api_port=5000
+# specify a different deepstack API port if not 5000
+#deepstack_api_port=5000
+
+# specify a custom model to use if you'd like to use that
+#deepstack_custom_model=yolov5m6
 
 [notify]
 pushover_user_key=<YOUR USER KEY HERE>
