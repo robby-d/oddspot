@@ -35,8 +35,13 @@ sudo docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
 
 # then install and run the deepstack container on port 5000
 sudo docker pull deepquestai/deepstack:gpu-2021.09.1
-# in the command below, replace `/home/local/oddspot/` with your oddspot directory
-sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -v /home/local/oddspot/custom_models:/modelstore/detection -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
+sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
+
+# IF RUNNING CUSTOM MODELS: put your custom models in the custom_models directory,
+# then, in the command below, replace `/home/local/oddspot/` with your oddspot directory
+#sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -v /home/local/oddspot/custom_models:/modelstore/detection -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
+
+
 ```
 
 Install and start deepstack (if using CPU):
