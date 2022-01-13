@@ -1,27 +1,53 @@
 # oddspot
-Uses MobileNet NN to locate and notify security cam images based on presence of people, vehicles
+Uses yolov5 / COCONET to locate and notify security cam images based on presence of people, vehicles, and so on
 
 ## Credits
 
-* Neural net code originally taken from [here](https://www.pyimagesearch.com/2017/09/11/object-detection-with-deep-learning-and-opencv/).
 * Email parsing originally from [here](https://www.ianlewis.org/en/parsing-email-attachments-python).
 
 ## Setup (Ubuntu 20.04 LTS)
 
 These instructions are for a stock Ubuntu 20.04 LTS system.
 
-Install dependencies:
+Install base dependencies:
 ```
-sudo apt-get -y install gcc g++ python3 python3-setuptools sendemail
-sudo pip3 install python-pushover numpy opencv-contrib-python-headless torch torchvision aiosmtpd
-sudo pip3 install cython; sudo pip3 install 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
-sudo pip3 install 'git+https://github.com/facebookresearch/detectron2.git'
+sudo apt-get update
+sudo apt-get -y install gcc g++ python3 python3-setuptools sendemail docker.io
+sudo pip3 install python-pushover aiosmtpd deepstack-sdk
 ```
 
-If you are doing analysis with a NVIDIA GPU, also run this command to install the CUDA toolkit:
+If you have a CUDA-capable NVIDIA GPU installed in your system, `oddspot` will work with it automatically, as long as the drivers are installed. 
 ```
-sudo apt-get -y install nvidia-cuda-toolkit
+sudo apt-get -y install ubuntu-drivers-common nvidia-cuda-toolkit
+sudo ubuntu-drivers autoinstall
+
+#Then reboot your system for the driver to be properly loaded.
+sudo reboot
 ```
+
+Install and start deepstack (if using GPU):
+```
+# install nvidia container toolkit
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID) \
+   && curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add - \
+   && curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+sudo apt-get update
+sudo apt-get install -y nvidia-docker2
+sudo systemctl restart docker
+# test and make sure the GPU is visible from a docker container
+sudo docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+
+# then install and run the deepstack container
+sudo docker pull deepquestai/deepstack:gpu-2021.09.1
+sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
+```
+
+Install and start deepstack (if using CPU):
+```
+docker pull deepquestai/deepstack
+docker run -e VISION-DETECTION=True -v localstorage:/datastore -p 80:5000 -d --restart always deepquestai/deepstack
+```
+
 
 ## Sample config
 
@@ -34,19 +60,8 @@ Create a file `oddspot.ini` within the `oddspot` base directory containing the f
 # e.g. 0.2 = 20%, 0.7 = 70%
 min_confidence=0.7
 
-#objdetection_framework: either detectron2 or opencv_mobilenetssd
-objdetection_framework=detectron2
-
-#detectron2_config_file: detectron2 config file to use.
-# See options at: https://github.com/facebookresearch/detectron2/tree/master/configs
-#detectron2_config_file=configs/quick_schedules/mask_rcnn_R_50_FPN_inference_acc_test.yaml
-
-#detectron2_extra_opts: Extra configuration options sent to detectron2
-# Uncomment the line below to run on an opengl GPU interface
-#detectron2_extra_opts=MODEL.DEVICE opengl
-# (GPU options are: cuda, mkldnn, opengl, opencl, ideep, hip, msnpu)
-# NOTE that oddspot will auto detect available CUDA GPUs and parallelize across them
-# Other GPU types require manual configuration via this option
+#YOLOv5 model to use. One of: 'yolov5n', 'yolov5s', 'yolov5m', 'yolov5l', 'yolov5x','yolov5n6', 'yolov5s6', 'yolov5m6', 'yolov5l6', 'yolov5x6'
+yolov5_model = yolov5m
 
 [notify]
 pushover_user_key=<YOUR USER KEY HERE>
@@ -55,8 +70,8 @@ pushover_api_token=<YOUR API KEY HERE>
 #min_notify_period: only send out a pushover notification for a given camera this often (in seconds)
 min_notify_period=600
 
-#notify_on_dataset_categories: object labels/classes to notify on
-notify_on_dataset_categories=bus,car,motorcycle,person,truck
+#notify_on_dataset_categories: yolov5 / COCO dataset labels to notify on
+notify_on_dataset_categories=person,bicycle,car,motorcycle,bus,truck
 
 [smtpd]
 listen_host =
@@ -99,6 +114,7 @@ Description=oddspot
 [Service]
 ExecStart=/home/<USER>/oddspot/oddspot.py
 User=<USER>
+Group=<USER GROUP>
 Restart=on-failure
 RestartSec=30s
 
@@ -115,21 +131,3 @@ sudo systemctl start oddspot
 
 Modify your camera setup (via its embedded web configuration page) to send an email to `oddspot@<YOURMACHINE>:<YOURPORT>` on motion detection events. Make sure it attaches a snapshot of the event in jpeg or png format (and _not_ a video). Also, to avoid flooding the script, you should probably have it so that it will only send repeat emails every minute or more. The `oddspot` script allows you to further limit continuous emails on a per camera basis via the `min_notify_period` config setting, but it should get raw emails from the cameras on motion events more frequently than that, to maximize alerting accuracy).
 
-
-## Usage with a CUDA capable GPU
-
-If you have a CUDA-capable NVIDIA GPU installed in your system, `oddspot` can work with it if using the `detectron2` framework. 
-
-If using Ubuntu, install the CUDA drivers:
-```
-sudo add-apt-repository ppa:graphics-drivers/ppa
-sudo apt-get update
-sudo apt-get install nvidia-driver-460
-```
-
-Add (or uncomment) the following line in your `oddspot.ini` file:
-```
-detectron2_extra_opts=MODEL.DEVICE cuda
-```
-
-Then reboot your system for the driver to be properly loaded.

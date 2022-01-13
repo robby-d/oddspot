@@ -3,6 +3,7 @@
 
 import os
 import sys
+import time
 import datetime
 import configparser
 import argparse
@@ -20,6 +21,7 @@ import threading
 import atexit
 import signal
 import socket
+import random
 from builtins import str
 
 from memory_profiler import profile
@@ -28,15 +30,15 @@ import objgraph
 import pushover
 import torch
 import cv2
+import cmapy
 import numpy as np
 from aiosmtpd.controller import Controller as AiosmtpdController
+from deepstack_sdk import ServerConfig, Detection
 
 import util
-from objdetection import detectron2, opencv_mobilenetssd
 
 # memory leak tracing
 import tracemalloc
-tracemalloc.start()
 
 PROG_NAME = "oddspot"
 CURDIR = os.path.dirname(os.path.realpath(__file__))
@@ -44,13 +46,13 @@ STATE_FILE = os.path.join(CURDIR, "{}.dat".format(PROG_NAME))
 LOG_FILE = os.path.join(CURDIR, "logs", "{}.log".format(PROG_NAME))
 CONF_FILE = os.path.join(CURDIR, "{}.ini".format(PROG_NAME))
 
-DEFAULT_MODEL_CLASSES_OVERRIDE = []
 DEFAULT_MIN_CONFIDENCE = 0.7  # 70%
-OBJDETECTION_FRAMEWORK_CHOICES = ("detectron2", "opencv_mobilenetssd")
-DEFAULT_OBJDETECTION_FRAMEWORK = "detectron2"
-DEFAULT_MODEL_CLASSES = "background,car,bus,person"
+YOLOV5_MODEL_CHOICES = ('yolov5n', 'yolov5s', 'yolov5m', 'yolov5l', 'yolov5x','yolov5n6', 'yolov5s6', 'yolov5m6', 'yolov5l6', 'yolov5x6')
+DEFAULT_YOLOV5_MODEL = 'yolov5m'
 DEFAULT_MIN_NOTIFY_PERIOD = 600  # in seconds (600 = 10 minutes)
 PUSHOVER_MAX_ATTACHMENT_SIZE = 2621440  # 2.5MB
+PLATE_RECOGNIZER_ALLOWED_DETECTION_CATEGORIES = ('car', 'truck', 'bus', 'motorcycle')
+DEEPSTACK_DEFAULT_API_PORT = 5000
 
 # globals
 logger = logging.getLogger(__name__)
@@ -70,9 +72,12 @@ def load_config():
     conf['min_confidence'] = cp.getfloat('detection', 'min_confidence', fallback=DEFAULT_MIN_CONFIDENCE)
     assert conf['min_confidence'] > 0.0 and conf['min_confidence'] <= 1.0
 
-    conf['objdetection_framework'] = cp.get('detection', 'objdetection_framework', fallback=DEFAULT_OBJDETECTION_FRAMEWORK)
-    if conf['objdetection_framework'] not in OBJDETECTION_FRAMEWORK_CHOICES:
-        raise Exception("'objdetection_framework' config option must be one of: {}".format(', '.join(OBJDETECTION_FRAMEWORK_CHOICES)))
+    #conf['yolov5_model'] = cp.get('detection', 'yolov5_model', fallback=DEFAULT_YOLOV5_MODEL)
+    #if conf['yolov5_model'] not in YOLOV5_MODEL_CHOICES:
+    #    raise Exception("Invalid YOLOv5 model, must be one of: {}".format(', '.join(YOLOV5_MODEL_CHOICES)))
+
+    conf['deepstack_api_port'] = cp.getint('detection', 'deepstack_api_port', fallback=DEEPSTACK_DEFAULT_API_PORT)
+    assert conf['deepstack_api_port'] < 65535
 
     # section: notify
     conf['pushover_user_key'] = cp.get('notify', 'pushover_user_key')
@@ -109,6 +114,9 @@ def load_config():
     conf['camera_custom_configs'] = cp.get('cameras', 'camera_custom_configs', fallback={})
     conf['camera_custom_configs'] = json.loads(conf['camera_custom_configs'])
     assert isinstance(conf['camera_custom_configs'], dict)
+
+    # section: other
+    conf['memory_usage_logging'] = cp.getboolean('other', 'memory_usage_logging', fallback=False)
 
     return conf, cp
 
@@ -182,8 +190,10 @@ def email_worker_iter(thread_index, processing_queue, detector):
         logger.warn("worker{:02}: Cannot parse out image from email".format(thread_index))
         return True
     # use first attachment
-    img_attachment = parsed_email['attachments'][0]
-    img_attachment.seek(0)  # just in case
+    img_attachment_raw = parsed_email['attachments'][0]
+    img_attachment_raw.seek(0)  # just in case
+    bytes_as_np_array = np.frombuffer(img_attachment_raw.read(), dtype=np.uint8)
+    image = cv2.imdecode(bytes_as_np_array, cv2.IMREAD_UNCHANGED)    
 
     # determine which camera sent us this image (using the entire from email address if no friendly name in 'camera_names_from_sender')
     camera_name = conf['camera_names_from_sender'].get(parsed_email['from'], parsed_email['from'])
@@ -205,12 +215,44 @@ def email_worker_iter(thread_index, processing_queue, detector):
         always_notify = True
 
     #perform detection
-    if conf['objdetection_framework'] == 'detectron2':
-        found_objects, image = detector.do_detections(img_attachment)
-    else:
-        assert conf['objdetection_framework'] == 'opencv_mobilenetssd'
-        found_objects, image = detector.do_detections(conf['min_confidence'], img_attachment)
+    detection_start = time.time()
+    response = detector.detectObject(image, min_confidence=conf['min_confidence'])
+    detection_end = time.time()
+    found_objects = [(obj.label, obj.confidence) for obj in response]
+    #mark up image
+    for obj in response:
+        #properties: obj.label, obj.confidence, obj.x_min, obj.y_min, obj.x_max, obj.y_max
+        color_fg = cmapy.color('plasma', random.randrange(0, 256), rgb_order=False)
 
+        # draw rectangle around recognized object
+        cv2.rectangle(image, (obj.x_min, obj.y_min), (obj.x_max, obj.y_max), color_fg, 2, cv2.LINE_AA)
+
+        # add label to rectangle
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0  # or 0.5
+        font_thickness = 2
+        text_color_bg=(0, 0, 0)  # black
+        label = "{}: {:.2f}%".format(obj.label, obj.confidence * 100)
+        text_size, _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+        text_w, text_h = text_size
+
+        y = obj.y_min - text_h if obj.y_min - text_h > text_h else obj.y_min + text_h
+        # draw background rectangle for text
+        cv2.rectangle(image, (obj.x_min, y - text_h), (obj.x_min + text_w, y), text_color_bg, -1)
+        #cv2.rectangle(image, (obj.x_min, y), (obj.x_min + text_w, y + text_h), text_color_bg, -1)
+        cv2.putText(image, label, (obj.x_min, y), font, font_scale, color_fg, font_thickness, cv2.LINE_AA)
+
+    if False:
+        detection_results = detector(img_attachment)
+        detection_results.display(render=True)  # render detection boxes on image result
+        predictions = detection_results.pred[0].tolist()
+        #predictions is an array of results, with each result being an array with the following format:
+        # subscript 0,1,2,3 = x1, x2, y1, y2 (box bounds)
+        # subscript 4 = confidence (float between 0.0 and 1.0)
+        # subscript 5 = category (numerical)
+        found_objects = [(detector.names[int(e[5])], e[4]) for e in predictions]
+        image = cv2.cvtColor(detection_results.imgs[0], cv2.COLOR_BGR2RGB)  # color out of yolov5 rendering is BGR, but needs to be RGB
+    
     # print out all found objects
     for i, (category, confidence) in enumerate(found_objects):
         logger.info("worker{:02}: {}: '{}' identified with confidence of {:.2f}% ({})".format(
@@ -218,6 +260,9 @@ def email_worker_iter(thread_index, processing_queue, detector):
             i, category, confidence * 100.0,
             'USING' if confidence >= conf['min_confidence']
                 and category in conf['notify_on_dataset_categories'] else 'NOT USING'))
+    
+    # detection_results.t tuple is times for preprocessing, inferrance, and NMS
+    logger.info("worker{:02}: Detection took {:.2f}ms".format(thread_index, (detection_end - detection_start) * 1000.0))
 
     found_objects_str = ', '.join([e[0] for e in found_objects])
     found_objects_str_with_confidence = ', '.join(['{} ({:.2f}%)'.format(e[0], e[1] * 100.0) for e in found_objects])
@@ -253,14 +298,14 @@ def email_worker_iter(thread_index, processing_queue, detector):
     run_platerecognizer = False
     platerecognizer_info = []
     for found_object in [e[0] for e in found_objects]:
-        if found_object in ('car', 'truck', 'bus'):
+        if found_object in PLATE_RECOGNIZER_ALLOWED_DETECTION_CATEGORIES:
             run_platerecognizer = True
             break
     if conf['platerecognizer_api_key'] and run_platerecognizer:
-        #send the original image to platerecognizer, as any shading/flagging by detectron2 will reduce recognition accuracy
-        img_attachment.seek(0)  # just in case
+        #send the original image to platerecognizer, as any shading/flagging by object detection framework could reduce recognition accuracy
+        img_attachment_raw.seek(0)  # just in case
         r = requests.post('https://api.platerecognizer.com/v1/plate-reader/', data=dict(regions=conf['platerecognizer_regions_hint']),
-            files=dict(upload=img_attachment), headers={'Authorization': 'Token ' + conf['platerecognizer_api_key']})
+            files=dict(upload=img_attachment_raw), headers={'Authorization': 'Token ' + conf['platerecognizer_api_key']})
         if r.status_code not in (200, 201):
             logger.info("Invalid Platerecognizer response: {}".format(r.text))
             try:
@@ -289,15 +334,14 @@ def email_worker_iter(thread_index, processing_queue, detector):
 
 def email_worker_loop(thread_index, processing_queue, detector):
     while email_worker_iter(thread_index, processing_queue, detector):
-        #objgraph.show_most_common_types(limit=50)
-        #objgraph.show_growth(limit=20)
-        #pass
-
-        snapshot = tracemalloc.take_snapshot()
-        top_stats = snapshot.statistics('lineno')
-        logger.info("[ Top 10 ]")
-        for stat in top_stats[:10]:
-            logger.info(stat)
+        if conf['memory_usage_logging']:
+            #objgraph.show_most_common_types(limit=50)
+            #objgraph.show_growth(limit=20)
+            snapshot = tracemalloc.take_snapshot()
+            top_stats = snapshot.statistics('lineno')
+            logger.info("[ Top 10 ]")
+            for stat in top_stats[:10]:
+                logger.info(stat)
 
 def terminate_workers_and_cleanup(logger, aiosmtpd_controller, num_worker_threads, processing_queue, signal=None, frame=None):
     # NOTE: we have this cleanup_called variable because of an odd situation where registering this via atexit.register
@@ -333,19 +377,25 @@ def main():
     # set up logging
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(asctime)s:%(name)s - %(levelname)s - %(message)s')
+    stream_handler = logging.StreamHandler()
+    #stream_handler.setFormatter(formatter)
     file_handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=1048576 * 2, backupCount=5)
     file_handler.setFormatter(formatter)
     # log both to file and to console
+    logger.addHandler(stream_handler)
     logger.addHandler(file_handler)
-    logger.addHandler(logging.StreamHandler())
-    logger.info("START")
+    logger.info("START (uid: {}, gid: {})".format(os.geteuid(), os.getegid()))
 
     # set up exception and shutdown hooks
     sys.excepthook = handle_exception
 
     # load and validate config
     conf, cp = load_config()
+
+    # if memory logging enabled, start that
+    if conf['memory_usage_logging']:
+        tracemalloc.start()
 
     # load state
     state = util.load_state(STATE_FILE)
@@ -362,13 +412,10 @@ def main():
     logger.info("Mail server started")
 
     # determine # of worker threads to spawn
-    # with detectron2, we support multi CUDA GPU use automatically. So if we detect multiple CUDA GPUs
+    # we support multi CUDA GPU use automatically. So if we detect multiple CUDA GPUs
     # available, start a cooresponding number of threads to feed each one
     num_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0  # TODO: support other GPU interfaces as well
-    if conf['objdetection_framework'] == 'detectron2':
-        num_worker_threads = min(num_gpu, 1)  # if no GPUs, just 1 worker for the CPU
-    else:
-        num_worker_threads = 1
+    num_worker_threads = min(num_gpu, 1)  # if no GPUs, just 1 worker for the CPU
     logger.info("Detected {} CUDA GPUs".format(num_gpu))
 
     # wait on incoming mail messages
@@ -376,18 +423,22 @@ def main():
     threads = []
     for thread_index in range(num_worker_threads):
         # initialize detection engine
-        logger.info("worker{:02}: Initializaing {} detection engine... (thread_index: {})".format(thread_index, conf['objdetection_framework'], thread_index))
-        if conf['objdetection_framework'] == 'detectron2':
-            detector = detectron2.Detector(conf, cp, gpu_id=thread_index+1 if num_gpu else 0)
-        else:
-            assert conf['objdetection_framework'] == 'opencv_mobilenetssd'
-            detector = opencv_mobilenetssd.Detector(conf, cp)
+        logger.info("worker{:02}: Initializaing yolov5 detection engine... (thread_index: {})".format(thread_index, thread_index))
+        
+        # load yolov5 dataset on appropriate device
+        #detector = torch.hub.load('ultralytics/yolov5', conf['yolov5_model'], device=torch.device(thread_index))
+        #logging.getLogger('yolov5').setLevel(logging.INFO)
+        # start thread for processing with this model
+        #t = threading.Thread(target=email_worker_loop, args=(thread_index, processing_queue, detector))
+
+        deepstack_config = ServerConfig("http://localhost:{}".format(conf['deepstack_api_port']))
+        detector = Detection(deepstack_config)
 
         t = threading.Thread(target=email_worker_loop, args=(thread_index, processing_queue, detector))
         t.start()
         threads.append(t)
     logger.info("Started {} worker threads {}".format(num_worker_threads, threads))
-    
+
     # register via signal.signal for SIGTERM (e.g. via `systemctl stop`) as well as non-SIGTERM (via atexit.register)
     signal.signal(signal.SIGTERM, lambda signal, frame: terminate_workers_and_cleanup(
         logger, aiosmtpd_controller, num_worker_threads, processing_queue, signal=signal, frame=frame))
