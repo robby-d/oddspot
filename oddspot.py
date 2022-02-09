@@ -336,7 +336,7 @@ def terminate_workers_and_cleanup(logger, aiosmtpd_controller, num_worker_thread
     if cleanup_called:
         return
 
-    logger.debug("Program termination. Shutting down worker threads and cleaning up...(signal: {})".format(signal))
+    logger.info("Program termination. Shutting down worker threads and cleaning up...(signal: {})".format(signal))
     if frame:
         logger.debug(traceback.format_stack(frame))
 
@@ -399,8 +399,10 @@ def main():
     # we support multi CUDA GPU use automatically. So if we detect multiple CUDA GPUs
     # available, start a cooresponding number of threads to feed each one
     num_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0  # TODO: support other GPU interfaces as well
-    num_worker_threads = min(num_gpu, 1)  # if no GPUs, just 1 worker for the CPU
+    num_worker_threads = max(num_gpu, 1)  # if no GPUs, just 1 worker for the CPU
     logger.info("Detected {} CUDA GPUs".format(num_gpu))
+    if not num_gpu:
+        logger.warning("No GPUs detected, starting single CPU worker thread!")
 
     # wait on incoming mail messages
     logger.info("Starting {} worker threads...".format(num_worker_threads))

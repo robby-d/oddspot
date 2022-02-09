@@ -21,7 +21,14 @@ sudo ubuntu-drivers autoinstall
 sudo reboot
 ```
 
-Install and start deepstack (if using GPU):
+Note that if you run into an "unmet dependencies" error during running of the `ubuntu-drivers autoinstall` command, try the following:
+```
+sudo apt-get remove --purge nvidia-* -y
+sudo apt autoremove
+sudo ubuntu-drivers autoinstall
+```
+
+If using a GPU -- Install and start GPU-enabled deepstack:
 ```
 # install nvidia container toolkit
 distribution=$(. /etc/os-release;echo $ID$VERSION_ID) \
@@ -40,11 +47,9 @@ sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -
 # IF RUNNING CUSTOM MODELS: put your custom models in the custom_models directory,
 # then, in the command below, replace `/home/local/oddspot/` with your oddspot directory
 #sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -v /home/local/oddspot/custom_models:/modelstore/detection -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
-
-
 ```
 
-Install and start deepstack (if using CPU):
+If using a CPU -- Install and start non-GPU Deepstack:
 ```
 docker pull deepquestai/deepstack
 # in the command below, replace `/home/local/oddspot/` with your oddspot directory
@@ -99,7 +104,7 @@ camera_custom_configs={"testcam": {"always_notify": true}}
 
 ## Testing
 
-Start the command interactively, as any user account you wish. (Obviously, if you have your smtp port set to <= 1024, the service will need to run as `root`.):
+Start the command interactively, as any user account you wish. (If you have your smtp port set to <= 1024, the service will need to run as `root`.):
 
 `cd /home/<USER>/oddspot; ./oddspot.py --debug`
 
@@ -111,7 +116,7 @@ Tail `/home/<USER>/oddspot/logs/oddspot.log` to see if processing was successful
 
 ## Usage
 
-If testing was successful, you can have the `oddpspot` daemon start on startup via creating a file at `/etc/systemd/system/oddspot.service` with the following contents:
+You can have the `oddpspot` daemon start on startup via creating a file at `/etc/systemd/system/oddspot.service` with the following contents:
 
 ```
 [Unit]
