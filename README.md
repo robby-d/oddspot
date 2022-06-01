@@ -1,15 +1,15 @@
 # oddspot
 Daemon that listens for emails from cameras (with motion detection images attached) and uses [Deepstack](https://deepstack.cc/) to identify the presence of people, vehicles, et cetra and notify their existance via [Pushover](https://pushover.net/).
 
-## Setup (Ubuntu 20.04 LTS)
+## Setup (Ubuntu 22.04 LTS)
 
-These instructions are for a stock Ubuntu 20.04 LTS system.
+These instructions are for a stock Ubuntu 22.04 LTS system.
 
 Install base dependencies:
 ```
 sudo apt-get update
 sudo apt-get -y install gcc g++ python3 python3-setuptools sendemail docker.io
-sudo pip3 install python-pushover aiosmtpd deepstack-sdk
+sudo pip3 install -U git+https://github.com/almir1904/python-pushover.git#egg=python-pushover aiosmtpd deepstack-sdk torch cmapy
 ```
 
 If you have a CUDA-capable NVIDIA GPU installed in your system, `oddspot` will work with it automatically, as long as the drivers are installed. 
@@ -41,8 +41,8 @@ sudo systemctl restart docker
 sudo docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
 
 # then install and run the deepstack container on port 5000
-sudo docker pull deepquestai/deepstack:gpu-2021.09.1
-sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
+sudo docker pull deepquestai/deepstack:gpu-2022.01.1
+sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -p 5000:5000 -d --restart=always deepquestai/deepstack:gpu
 
 # IF RUNNING CUSTOM MODELS: put your custom models in the custom_models directory,
 # then, in the command below, replace `/home/local/oddspot/` with your oddspot directory

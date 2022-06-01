@@ -278,8 +278,8 @@ def email_worker_iter(thread_index, processing_queue, detector):
         return True
     logger.debug("worker{:02}: Resultant JPEG size: {}".format(thread_index, util.convert_size(len(image_str_encode))))
 
-    # run platerecognizer on images that have vehicles
-    run_platerecognizer = False
+    # run platerecognizer on images that have vehicles (or always run it if always_notify is set as we won't know if there are vehicles)
+    run_platerecognizer = False or always_notify
     platerecognizer_info = []
     for found_object in [e[0] for e in found_objects]:
         if found_object in PLATE_RECOGNIZER_ALLOWED_DETECTION_CATEGORIES:
@@ -288,19 +288,23 @@ def email_worker_iter(thread_index, processing_queue, detector):
     if conf['platerecognizer_api_key'] and run_platerecognizer:
         #send the original image to platerecognizer, as any shading/flagging by object detection framework could reduce recognition accuracy
         img_attachment_raw.seek(0)  # just in case
-        r = requests.post('https://api.platerecognizer.com/v1/plate-reader/', data=dict(regions=conf['platerecognizer_regions_hint']),
-            files=dict(upload=img_attachment_raw), headers={'Authorization': 'Token ' + conf['platerecognizer_api_key']})
-        if r.status_code not in (200, 201):
-            logger.info("Invalid Platerecognizer response: {}".format(r.text))
-            try:
-                error_detail = r.json()['detail']
-            except:
-                error_detail = "UNKNOWN ERROR"
-            platerecognizer_info.append("Platerecognizer API error: {}".format(error_detail))
+        try:
+            r = requests.post('https://api.platerecognizer.com/v1/plate-reader/', data=dict(regions=conf['platerecognizer_regions_hint']),
+                files=dict(upload=img_attachment_raw), headers={'Authorization': 'Token ' + conf['platerecognizer_api_key']})
+        except requests.exceptions.ConnectionError as e:
+            platerecognizer_info.append("Platerecognizer connection error: {}".format(e))
         else:
-            for vehicle in r.json()['results']:
-                platerecognizer_info.append("Plate {}: {}, {}, conf {}".format(
-                    vehicle['plate'], vehicle['region']['code'], vehicle['vehicle']['type'], vehicle['score']))
+            if r.status_code not in (200, 201):
+                logger.info("Invalid Platerecognizer response: {}".format(r.text))
+                try:
+                    error_detail = r.json()['detail']
+                except:
+                    error_detail = "UNKNOWN ERROR"
+                platerecognizer_info.append("Platerecognizer API error: {}".format(error_detail))
+            else:
+                for vehicle in r.json()['results']:
+                    platerecognizer_info.append("Plate {}: {}, {}, conf {}".format(
+                        vehicle['plate'], vehicle['region']['code'], vehicle['vehicle']['type'], vehicle['score']))
 
     # notify via pushover
     c = pushover.Client(conf['pushover_user_key'], api_token=conf['pushover_api_token'])
