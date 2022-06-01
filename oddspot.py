@@ -307,8 +307,8 @@ def email_worker_iter(thread_index, processing_queue, detector):
                         vehicle['plate'], vehicle['region']['code'], vehicle['vehicle']['type'], vehicle['score']))
 
     # notify via pushover
-    c = pushover.Client(conf['pushover_user_key'], api_token=conf['pushover_api_token'])
-    c.send_message("Identified {}{}".format(found_objects_str_with_confidence,
+    c = pushover.Pushover(conf['pushover_api_token'])
+    c.message(conf['pushover_user_key'], "Identified {}{}".format(found_objects_str_with_confidence,
         (' (' + ', '.join([vehicle for vehicle in platerecognizer_info]) + ')') if run_platerecognizer and platerecognizer_info else ''),
         title="{} Oddspot Alert".format(camera_name), attachment=('capture.jpg', image_str_encode))
     logger.info("worker{:02}: Alert sent via pushover".format(thread_index))
