@@ -1,5 +1,5 @@
 # oddspot
-Daemon that listens for emails from cameras (with motion detection images attached) and uses [Deepstack](https://deepstack.cc/) to identify the presence of people, vehicles, et cetra and notify their existance via [Pushover](https://pushover.net/).
+Daemon that receives emails from cameras (with motion detection images attached) and uses [Deepstack](https://deepstack.cc/) to identify and tag the presence of people, vehicles, et cetra. If items of interest are located, an alert is sent out via [Pushover](https://pushover.net/).
 
 ## Installation
 
