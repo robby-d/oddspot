@@ -1,9 +1,9 @@
 # oddspot
 Daemon that listens for emails from cameras (with motion detection images attached) and uses [Deepstack](https://deepstack.cc/) to identify the presence of people, vehicles, et cetra and notify their existance via [Pushover](https://pushover.net/).
 
-## Setup (Ubuntu 22.04 LTS)
+## Installation
 
-These instructions are for a stock Ubuntu 22.04 LTS system.
+These instructions are for a **stock Ubuntu 22.04 LTS system**.
 
 Install base dependencies:
 ```
