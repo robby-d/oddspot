@@ -1,6 +1,8 @@
 # Download base image ubuntu 22.04
 FROM ubuntu:22.04
 
+LABEL com.centurylinklabs.watchtower.enable="false"
+
 # Disable Prompt During Packages Installation
 ARG DEBIAN_FRONTEND=noninteractive
 
