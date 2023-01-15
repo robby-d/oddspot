@@ -1,0 +1,48 @@
+[detection]
+#the number of processing threads started on the system. 5 is probably fine unless you have a ton of GPUs
+num_threads=5
+
+#min_notify_period: minimum object identification confidence level in order to notify
+# we will notify if any identified object in the image has >= this level
+# e.g. 0.2 = 20%, 0.7 = 70%
+min_confidence=0.7
+
+# this hostname should be fine when running under docker compose
+deepstack_api_host = deepstack
+
+# specify a different deepstack API port if not 5000
+#deepstack_api_port=5000
+
+# specify a custom model to use if you'd like to use that
+#deepstack_custom_model=yolov5m6
+
+[notify]
+pushover_user_key=<YOUR USER KEY HERE>
+pushover_api_token=<YOUR API KEY HERE>
+
+#min_notify_period: only send out a pushover notification for a given camera this often (in seconds)
+min_notify_period=600
+
+#notify_on_dataset_categories: yolov5 / COCO dataset labels to notify on
+notify_on_dataset_categories=person,bicycle,car,motorcycle,bus,truck
+
+[smtpd]
+listen_host =
+listen_port = 10025
+
+[integrations]
+platerecognizer_api_key=<YOUR PLATERECOGNIZER.COM API KEY HERE OR BLANK TO DISABLE>
+#platerecognizer_regions_hint: array of platerecognizer reagons codes to provide as a hint to the object recognizer (blank or empty array to disable)
+platerecognizer_regions_hint=["us-nc", "us-va"]
+
+[cameras]
+#camera_names_from_sender: a JSON object that maps the From email address of the sending camera to a name that will show in the notification for it
+camera_names_from_sender={"local@smtp01.localnet": "testcam", "root@cam-front.localnet": "cam-front", "root@cam-back.localnet": "cam-back"}
+#camera_custom_configs: a JSON dict of dicts -- totally optional. Main dict keys are camera names. For each supplied camera name, certain options can be specified
+# currently available options:
+#   - always_notify: specify as true to always notify, regardless of image analysis results -- useful if the camera in question does its own advanced analysis
+camera_custom_configs={"testcam": {"always_notify": true}}
+
+[other]
+#set to true for debugging use only
+memory_usage_logging=false

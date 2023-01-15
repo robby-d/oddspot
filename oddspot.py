@@ -25,7 +25,6 @@ import random
 from builtins import str
 
 import pushover
-import torch
 import cv2
 import cmapy
 import numpy as np
@@ -41,9 +40,9 @@ import util
 
 PROG_NAME = "oddspot"
 CURDIR = os.path.dirname(os.path.realpath(__file__))
-STATE_FILE = os.path.join(CURDIR, "{}.dat".format(PROG_NAME))
+STATE_FILE = os.path.join(CURDIR, "state", "{}.dat".format(PROG_NAME))
 LOG_FILE = os.path.join(CURDIR, "logs", "{}.log".format(PROG_NAME))
-CONF_FILE = os.path.join(CURDIR, "{}.ini".format(PROG_NAME))
+CONF_FILE = os.path.join(CURDIR, "conf", "{}.ini".format(PROG_NAME))
 
 DEFAULT_MIN_CONFIDENCE = 0.7  # 70%
 DEFAULT_MIN_NOTIFY_PERIOD = 600  # in seconds (600 = 10 minutes)
@@ -66,8 +65,13 @@ def load_config():
     cp.read(CONF_FILE)
 
     # section: detection
+    conf['num_threads'] = cp.getint('detection', 'num_threads')
+    assert conf['num_threads'] > 0 and conf['num_threads'] <= 30  # arbitrary upper limit
+
     conf['min_confidence'] = cp.getfloat('detection', 'min_confidence', fallback=DEFAULT_MIN_CONFIDENCE)
     assert conf['min_confidence'] > 0.0 and conf['min_confidence'] <= 1.0
+
+    conf['deepstack_api_host'] = cp.get('detection', 'deepstack_api_host')
 
     conf['deepstack_api_port'] = cp.getint('detection', 'deepstack_api_port', fallback=DEEPSTACK_DEFAULT_API_PORT)
     assert conf['deepstack_api_port'] < 65535
@@ -365,14 +369,10 @@ def main():
     # set up logging
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
-    formatter = logging.Formatter('%(asctime)s:%(name)s - %(levelname)s - %(message)s')
     stream_handler = logging.StreamHandler()
+    #formatter = logging.Formatter('%(asctime)s:%(name)s - %(levelname)s - %(message)s')
     #stream_handler.setFormatter(formatter)
-    file_handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=1048576 * 2, backupCount=5)
-    file_handler.setFormatter(formatter)
-    # log both to file and to console
     logger.addHandler(stream_handler)
-    logger.addHandler(file_handler)
     logger.info("START (uid: {}, gid: {})".format(os.geteuid(), os.getegid()))
 
     # set up exception and shutdown hooks
@@ -399,33 +399,25 @@ def main():
     aiosmtpd_controller.start()  # will start a separate thread
     logger.info("Mail server started")
 
-    # determine # of worker threads to spawn
-    # we support multi CUDA GPU use automatically. So if we detect multiple CUDA GPUs
-    # available, start a cooresponding number of threads to feed each one
-    num_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0  # TODO: support other GPU interfaces as well
-    num_worker_threads = max(num_gpu, 1)  # if no GPUs, just 1 worker for the CPU
-    logger.info("Detected {} CUDA GPUs".format(num_gpu))
-    if not num_gpu:
-        logger.warning("No GPUs detected, starting single CPU worker thread!")
-
     # wait on incoming mail messages
-    logger.info("Starting {} worker threads...".format(num_worker_threads))
+    logger.info("Starting {} worker threads...".format(conf['num_threads']))
     threads = []
-    for thread_index in range(num_worker_threads):
+    for thread_index in range(conf['num_threads']):
         # initialize detection engine
-        logger.info("worker{:02}: Initializaing detection engine connection... (thread_index: {})".format(thread_index, thread_index))
-        deepstack_config = ServerConfig("http://localhost:{}".format(conf['deepstack_api_port']))
+        deepstack_uri = "http://{}:{}".format(conf['deepstack_api_host'], conf['deepstack_api_port'])
+        logger.info("worker{:02}: Initializaing detection engine connection to {}".format(thread_index, deepstack_uri))
+        deepstack_config = ServerConfig(deepstack_uri)
         detector = Detection(deepstack_config, name=conf['deepstack_custom_model'])
 
         t = threading.Thread(target=email_worker_loop, args=(thread_index, processing_queue, detector))
         t.start()
         threads.append(t)
-    logger.info("Started {} worker threads {}".format(num_worker_threads, threads))
+    logger.info("Started {} worker threads {}".format(conf['num_threads'], threads))
 
     # register via signal.signal for SIGTERM (e.g. via `systemctl stop`) as well as non-SIGTERM (via atexit.register)
     signal.signal(signal.SIGTERM, lambda signal, frame: terminate_workers_and_cleanup(
-        logger, aiosmtpd_controller, num_worker_threads, processing_queue, signal=signal, frame=frame))
-    atexit.register(terminate_workers_and_cleanup, logger, aiosmtpd_controller, num_worker_threads, processing_queue)
+        logger, aiosmtpd_controller, conf['num_threads'], processing_queue, signal=signal, frame=frame))
+    atexit.register(terminate_workers_and_cleanup, logger, aiosmtpd_controller, conf['num_threads'], processing_queue)
 
     # Wait for all worker threads to finish (will normally sit forever,
     # until exit signal/keyboard interrupt/exception received)
@@ -433,7 +425,7 @@ def main():
         for t in threads:
             t.join()
     except KeyboardInterrupt:
-        for i in range(num_worker_threads):
+        for i in range(conf['num_threads']):
             processing_queue.put(None)
         
 if __name__ == "__main__":

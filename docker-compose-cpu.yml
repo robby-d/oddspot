@@ -1,0 +1,36 @@
+version: '3.8'
+name: "oddspot"
+
+services:
+  oddspot:
+    build: .
+    restart: 'always'
+    depends_on:
+      - deepstack
+    links:
+      - deepstack
+    volumes:
+      - ./conf:/home/oddspot/conf:ro
+      - ./custom_models:/home/oddspot/custom_models:ro
+      - oddspot_data:/home/oddspot/state
+    ports:
+      - '10025:10025'
+    # you can delete this labels section if not using ufw-docker-automated (https://github.com/shinebayar-g/ufw-docker-automated)
+    labels:
+      UFW_MANAGED: 'TRUE'
+      UFW_ALLOW_FROM: '10.0.0.0/16-10025'
+
+  deepstack:
+    image: deepquestai/deepstack
+    restart: 'always'
+    ports:
+      - '80:5000'
+    volumes:
+      - deepstack_data:/datastore
+    environment:
+      - "VISION-DETECTION=True"
+
+volumes:
+  oddspot_data:
+  deepstack_data:
+

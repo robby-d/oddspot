@@ -3,13 +3,17 @@ Daemon that receives emails from cameras (with motion detection images attached)
 
 ## Installation
 
+`oddspot` installs as a Docker Compose stack.
 These instructions are for a **stock Ubuntu 22.04 LTS system**.
 
 Install base dependencies:
 ```
-sudo apt-get update
-sudo apt-get -y install gcc g++ python3 python3-setuptools sendemail docker.io
-sudo pip3 install -U git+https://github.com/almir1904/python-pushover.git#egg=python-pushover aiosmtpd deepstack-sdk torch cmapy
+sudo apt-get -y install sendemail curl
+curl -fsSL get.docker.com -o get-docker.sh && sudo sh get-docker.sh
+#add your user to the docker group
+sudo adduser $USER docker
+#either log out and back in, or run this next command for the group changes to take effect...
+su - $USER
 ```
 
 If you have a CUDA-capable NVIDIA GPU installed in your system, `oddspot` will work with it automatically, as long as the drivers are installed. 
@@ -28,85 +32,43 @@ sudo apt autoremove
 sudo ubuntu-drivers autoinstall
 ```
 
-If using a GPU -- Install and start GPU-enabled deepstack:
+If using a GPU -- Install Nvidia container toolkit as well:
 ```
 # install nvidia container toolkit
 distribution=$(. /etc/os-release;echo $ID$VERSION_ID) \
-   && curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add - \
-   && curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+      && curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+      && curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
+            sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+            sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 sudo apt-get update
 sudo apt-get install -y nvidia-docker2
 sudo systemctl restart docker
 # test and make sure the GPU is visible from a docker container
-sudo docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
-
-# then install and run the deepstack container on port 5000
-sudo docker pull deepquestai/deepstack:gpu-2022.01.1
-sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -p 5000:5000 -d --restart=always deepquestai/deepstack:gpu
-
-# IF RUNNING CUSTOM MODELS: put your custom models in the custom_models directory,
-# then, in the command below, replace `/home/local/oddspot/` with your oddspot directory
-#sudo docker run --gpus all -e VISION-DETECTION=True -v localstorage:/datastore -v /home/local/oddspot/custom_models:/modelstore/detection -p 5000:5000 -d --restart always deepquestai/deepstack:gpu
+docker run --rm --gpus all nvidia/cuda:11.6.2-base-ubuntu20.04 nvidia-smi
 ```
-
-If using a CPU -- Install and start non-GPU Deepstack:
-```
-docker pull deepquestai/deepstack
-# in the command below, replace `/home/local/oddspot/` with your oddspot directory
-docker run -e VISION-DETECTION=True -v localstorage:/datastore -v /home/local/oddspot/custom_models:/modelstore/detection -p 80:5000 -d --restart always deepquestai/deepstack
-```
-
 
 ## Sample config
 
-Create a file `oddspot.ini` within the `oddspot` base directory containing the following:
-
+Copy the `conf/oddspot.ini.dist` file to `conf/oddspot.ini` and customize it to your needs.
+Once created, set the proper permissions:
 ```
-[detection]
-#min_notify_period: minimum object identification confidence level in order to notify
-# we will notify if any identified object in the image has >= this level
-# e.g. 0.2 = 20%, 0.7 = 70%
-min_confidence=0.7
-
-# specify a different deepstack API port if not 5000
-#deepstack_api_port=5000
-
-# specify a custom model to use if you'd like to use that
-#deepstack_custom_model=yolov5m6
-
-[notify]
-pushover_user_key=<YOUR USER KEY HERE>
-pushover_api_token=<YOUR API KEY HERE>
-
-#min_notify_period: only send out a pushover notification for a given camera this often (in seconds)
-min_notify_period=600
-
-#notify_on_dataset_categories: yolov5 / COCO dataset labels to notify on
-notify_on_dataset_categories=person,bicycle,car,motorcycle,bus,truck
-
-[smtpd]
-listen_host =
-listen_port = 10025
-
-[integrations]
-platerecognizer_api_key=<YOUR PLATERECOGNIZER.COM API KEY HERE OR BLANK TO DISABLE>
-#platerecognizer_regions_hint: array of platerecognizer reagons codes to provide as a hint to the object recognizer (blank or empty array to disable)
-platerecognizer_regions_hint=["us-nc", "us-va"]
-
-[cameras]
-#camera_names_from_sender: a JSON object that maps the From email address of the sending camera to a name that will show in the notification for it
-camera_names_from_sender={"local@smtp01.localnet": "testcam", "root@cam-front.localnet": "cam-front", "root@cam-back.localnet": "cam-back"}
-#camera_custom_configs: a JSON dict of dicts -- totally optional. Main dict keys are camera names. For each supplied camera name, certain options can be specified
-# currently available options:
-#   - always_notify: specify as true to always notify, regardless of image analysis results -- useful if the camera in question does its own advanced analysis
-camera_custom_configs={"testcam": {"always_notify": true}}
+sudo chown ${USER}:35501 conf/oddspot.ini
+sudo chmod 640 conf/oddspot.ini
 ```
 
 ## Testing
 
-Start the command interactively, as any user account you wish. (If you have your smtp port set to <= 1024, the service will need to run as `root`.):
+If you have a GPU:
+```
+docker compose build
+docker compose up
+```
 
-`cd /home/<USER>/oddspot; ./oddspot.py --debug`
+If using a CPU:
+```
+docker compose build
+docker compose -f docker-compose-cpu.yml up
+```
 
 Then, copy a camera capture image to the system, and run the following command in another terminal window to send a test email that `oddspot` should pick up and process:
 
@@ -116,29 +78,7 @@ Tail `/home/<USER>/oddspot/logs/oddspot.log` to see if processing was successful
 
 ## Usage
 
-You can have the `oddpspot` daemon start on startup via creating a file at `/etc/systemd/system/oddspot.service` with the following contents:
-
-```
-[Unit]
-Description=oddspot
-
-[Service]
-ExecStart=/home/<USER>/oddspot/oddspot.py
-User=<USER>
-Group=<USER GROUP>
-Restart=on-failure
-RestartSec=30s
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then run:
-
-```
-sudo systemctl enable oddspot
-sudo systemctl start oddspot
-```
+Just launch `docker compose up -d` (or `docker compose -f docker-compose-cpu.yml up -d` for CPU-only installs). The service will properly launch after a reboot.
 
 Modify your camera setup (via its embedded web configuration page) to send an email to `oddspot@<YOURMACHINE>:<YOURPORT>` on motion detection events. Make sure it attaches a snapshot of the event in jpeg or png format (and _not_ a video). Also, to avoid flooding the script, you should probably have it so that it will only send repeat emails every minute or more. The `oddspot` script allows you to further limit continuous emails on a per camera basis via the `min_notify_period` config setting, but it should get raw emails from the cameras on motion events more frequently than that, to maximize alerting accuracy).
 
