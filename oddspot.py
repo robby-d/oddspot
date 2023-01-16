@@ -41,7 +41,6 @@ import util
 PROG_NAME = "oddspot"
 CURDIR = os.path.dirname(os.path.realpath(__file__))
 STATE_FILE = os.path.join(CURDIR, "state", "{}.dat".format(PROG_NAME))
-LOG_FILE = os.path.join(CURDIR, "logs", "{}.log".format(PROG_NAME))
 CONF_FILE = os.path.join(CURDIR, "conf", "{}.ini".format(PROG_NAME))
 
 DEFAULT_MIN_CONFIDENCE = 0.7  # 70%

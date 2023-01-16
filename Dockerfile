@@ -34,7 +34,8 @@ RUN chown -R oddspot:oddspot /home/oddspot
 # Volume configuration
 VOLUME ["/home/oddspot/state"]
 
-# Copy start.sh script and define default command for the container
+#Run program as our user
+USER oddspot:oddspot
 CMD ["/home/oddspot/oddspot.py"]
 
 # Expose Port for the Application 
